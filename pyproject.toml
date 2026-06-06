@@ -30,3 +30,5 @@ Repository = "https://github.com/fastice/s1setup"
 [project.scripts]
 checkframes = "s1setup.checkframes:main"
 "checkframes.py" = "s1setup.checkframes:main"
+trimTopsSLCsToFit = "s1setup.trimTopsSLCsToFit:main"
+"trimTopsSLCsToFit.py" = "s1setup.trimTopsSLCsToFit:main"

@@ -4,4 +4,4 @@
 @author: ian
 """
 
-__all__ = ['checkframes']
+__all__ = ['checkframes', 'trimTopsSLCsToFit']
