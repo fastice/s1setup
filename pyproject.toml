@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "s1setup"
+version = "0.0.1"
+description = "Code for Sentinel-1 preprocessing (some requires the Gamma SAR processor)"
+authors = [
+    { name = "Ian Joughin", email = "irj@uw.edu" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["SAR", "Sentinel-1", "GrIMP", "Gamma"]
+requires-python = ">=3.8"
+
+dependencies = [
+    "sarfunc",
+    "utilities",
+    "numpy"
+]
+
+[tool.setuptools]
+packages = ["s1setup"]
+
+[project.urls]
+Homepage = "https://github.com/fastice/s1setup"
+Repository = "https://github.com/fastice/s1setup"
+
+[project.scripts]
+checkframes = "s1setup.checkframes:main"
+"checkframes.py" = "s1setup.checkframes:main"
