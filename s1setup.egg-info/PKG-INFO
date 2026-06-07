@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: s1setup
+Version: 0.0.1
+Summary: Code for Sentinel-1 preprocessing (some requires the Gamma SAR processor)
+Author-email: Ian Joughin <irj@uw.edu>
+License: MIT
+Project-URL: Homepage, https://github.com/fastice/s1setup
+Project-URL: Repository, https://github.com/fastice/s1setup
+Keywords: SAR,Sentinel-1,GrIMP,Gamma
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: sarfunc
+Requires-Dist: utilities
+Requires-Dist: numpy
+
 # s1setup
 
 Code for Sentinel-1 preprocessing (some requires the [Gamma SAR processor](https://www.gamma-rs.ch/software)).

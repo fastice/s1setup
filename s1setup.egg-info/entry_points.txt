@@ -1,0 +1,7 @@
+[console_scripts]
+catMultipleTops = s1setup.catMultipleTops:main
+catMultipleTops.py = s1setup.catMultipleTops:main
+checkframes = s1setup.checkframes:main
+checkframes.py = s1setup.checkframes:main
+trimTopsSLCsToFit = s1setup.trimTopsSLCsToFit:main
+trimTopsSLCsToFit.py = s1setup.trimTopsSLCsToFit:main
