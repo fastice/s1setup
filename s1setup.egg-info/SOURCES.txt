@@ -3,6 +3,8 @@ pyproject.toml
 s1setup/__init__.py
 s1setup/catMultipleTops.py
 s1setup/checkframes.py
+s1setup/cloneSLCdir.py
+s1setup/cullSLCclones.py
 s1setup/trimTopsSLCsToFit.py
 s1setup.egg-info/PKG-INFO
 s1setup.egg-info/SOURCES.txt

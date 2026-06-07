@@ -4,4 +4,4 @@
 @author: ian
 """
 
-__all__ = ['catMultipleTops', 'checkframes', 'trimTopsSLCsToFit']
+__all__ = ['catMultipleTops', 'checkframes', 'cloneSLCdir', 'cullSLCclones', 'trimTopsSLCsToFit']
