@@ -26,7 +26,7 @@ def setupClone():
     parser.add_argument('track', type=str, default='',
                         help='track dir (e.g., track-90')
     parser.add_argument('sensor', type=str,
-                        choices=['S1A', 'S1B', 'S1C'],
+                        choices=['S1A', 'S1B', 'S1C', 'S1D'],
                         help='track dir (e.g., track-90')
     parser.add_argument('--sourcePath', type=str, default='Sentinel1',
                         help='Path to directory to clone')
@@ -84,7 +84,7 @@ def parseGeojson(geojsonData, echo=False):
     # geojson dicts
     props = geojsonData['properties']
     date = datetime.strptime(props['Date'], '%Y-%m-%d')
-    for s1 in ["S1A", "S1C", "S1B", None]:
+    for s1 in ["S1A", "S1C", "S1B", "S1D", None]:
         if s1 in props['ImageName']:
             break
     return s1, date

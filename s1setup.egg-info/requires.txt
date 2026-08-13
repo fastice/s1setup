@@ -1,3 +1,0 @@
-sarfunc
-utilities
-numpy
