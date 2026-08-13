@@ -19,7 +19,20 @@ track-N/<orbit>/   (raw SAFE dirs)
    │
    ▼
 track-N/<orbit>-<seq>/   (merged SLC ready for pairing)
+   │
+   ├─ segmentTrack            → proposes orbitframes entries (read-only, terminal output)
+   └─ setupSeveralTopsImages  → track-N/<orbit>_<firstBurst>/   (reads frames + orbitframes)
 ```
+
+### Reframing (`segmentTrack` → `setupSeveralTopsImages`)
+
+The reframed directory is `<orbit>_<firstBurst>` and pairing (`mosaicworkflow.grepdate.findPair`)
+matches that name **exactly**. So `firstBurst` is the pairing key and `nBursts` is free: shorten a
+piece as much as the data requires and it still pairs, but shift its start and it needs matching
+pieces in the neighbouring acquisitions before any pair can form. That asymmetry is what makes
+`orbitframes` hard to maintain, and it is what `segmentTrack` automates — see
+`Documents/segmentTrack.md` for the rules. `segmentTrack` never modifies `frames`; when a track's
+real segmentation has outgrown its `frames` file it says so and stops rather than inventing frames.
 
 - Steps 1–2 run in `track-N/` against the raw orbit dir; step 3 runs inside the orbit dir; step 4 produces the merged output dir `<orbit>-<seq>/`; step 5 writes into that output dir.
 - If `frameRange` doesn't exist in the track dir, step 3 is skipped.
@@ -51,6 +64,7 @@ track-N/<orbit1>-<seq>/  +  track-N/<orbit2>-<seq>/
 | `radcalcoeffs` | Step 5 — computes beta-nought calibration coefficient from SAFE calibration XML → `betaNought` |
 | `updateS1State` | Updates a Gamma SLC `.par` with precise OPOD state vectors via `S1_OPOD_vec`; called by `runPreProcTops` |
 | `checkframes` | Scans orbit dirs for burst/frame coverage gaps and early/late frames; can move/split problematic SAFEs |
+| `segmentTrack` | Proposes `orbitframes` entries from the `.btimes` burst coverage; read-only, prints to the terminal. Runs before `setupSeveralTopsImages` |
 | `setupSeveralTopsImages` | Creates per-orbit/frame `setup_orbit_frame` scripts via Gamma's `setuptopsimage`, reading `frames`/`orbitframes` control files |
 | `setupStrackReg` | Per-pair registration (`coarsereg` + Gamma offset_* + `simoffsets.py` + `strack`) or full offset tracking + culling (`strack` + `cullst` via `cleanoff`) |
 | `cloneSLCdir` | Clones an SLC directory for a sensor/date range — copies small metadata, symlinks large `.slc`/`.pow` files |
@@ -77,3 +91,5 @@ track-N/<orbit1>-<seq>/  +  track-N/<orbit2>-<seq>/
 - Orbit directory naming: raw source dirs are `NNNNN` or `NNNNN_SEQ` (`isSourceOrbitDir`/`parseOrbitSeq`); merged output dirs are `NNNNN-SEQ`.
 - `setupTrack` groups all orbits processed in one run by track directory and writes a single log file per track: `log.<trackName>.<pid>.<YYYYMMDD>`.
 - `checkframes`' default valid burst range is `[300, 750]`, overridable via a `frameRange` file (also consumed by `trimTopsSLCsToFit`).
+- **`setupTrack --queue`** takes its work from `asfSearchAndDownload`'s `toProcess.yaml` (see `Documents/setupTrack.md`), **consuming** entries as they finish and routing failures to `problem.yaml` with a `comment` naming the failing step. This is the only place s1setup depends on asfSearchAndDownload: `queueS1` is imported **lazily, inside `resolveQueueUnits`**, so the classic directory path keeps its ~0.1 s start and still runs where that package is absent. Do not hoist that import to module scope.
+- Internal contracts queue mode relies on, easy to break by accident: `classifyOrbits` returns `(runList, skips)` with a machine-readable skip *code* per entry (the `'retrying'` code is a message only — those units are in `runList`); `processOrbit` returns `('ok'|'skipped'|'failed', detail)` — its early returns used to be `True`, which conflated "did nothing" with "processed"; `_runSteps` returns `(ok, detail)` where detail names the failing step and is what ends up in the problem comment.

@@ -17,7 +17,9 @@ requires-python = ">=3.8"
 dependencies = [
     "sarfunc",
     "utilities",
-    "numpy"
+    "numpy",
+    "pyyaml",
+    "asfSearchAndDownload"
 ]
 
 [tool.setuptools]
@@ -40,6 +42,8 @@ trimTopsSLCsToFit = "s1setup.trimTopsSLCsToFit:main"
 "trimTopsSLCsToFit.py" = "s1setup.trimTopsSLCsToFit:main"
 setupTrack = "s1setup.setupTrack:main"
 "setupTrack.py" = "s1setup.setupTrack:main"
+segmentTrack = "s1setup.segmentTrack:main"
+"segmentTrack.py" = "s1setup.segmentTrack:main"
 setupSeveralTopsImages = "s1setup.setupSeveralTopsImages:main"
 "setupSeveralTopsImages.py" = "s1setup.setupSeveralTopsImages:main"
 setupStrackReg = "s1setup.setupStrackReg:main"
