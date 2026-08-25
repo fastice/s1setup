@@ -614,7 +614,11 @@ def runSetup(args, firstDate, lastDate, lockStack):
 
     if args.queue:
         assemblyDir = os.path.abspath(args.assemblyDir)
-        queueDir = os.path.abspath(args.queueDir or assemblyDir)
+        # Lazy, as everywhere else here: the classic directory path must not
+        # pay for the asfSearchAndDownload import, nor require it installed.
+        from asfsearchdownload import queueS1 as _queueS1
+        queueDir = _queueS1.resolveQueueDir(
+            assemblyDir, args.queueDir, migrate=not args.check)
         # Serialize against checkFramesS1, which shutil.moves SAFE dirs while
         # restructuring -- that would pull data out from under a running unit.
         # --lockHeld means our caller (autoupdateS1) already holds it.

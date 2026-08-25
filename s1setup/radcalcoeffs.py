@@ -9,7 +9,7 @@ Created on Wed Nov 14 07:31:38 2018
 import argparse
 import os
 import utilities as u
-import myDev as ss
+from s1setup.s1XMLreader import S1XMLreader
 
 
 def radCalCoeffsArgs():
@@ -55,7 +55,7 @@ def processCalFile(s1XML):
     if not os.path.exists(calFile):
         u.myerror('Missing calibration file {0:s}'.format(calFile))
     # read xml
-    myCalXML = ss.S1XMLheader(calFile)
+    myCalXML = S1XMLreader(calFile)
     return myCalXML.betaNought()
 
 

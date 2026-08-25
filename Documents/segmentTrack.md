@@ -1,11 +1,14 @@
 # segmentTrack
 
 Proposes `orbitframes` entries for a track from the burst coverage that
-`catMultipleTops`/`computeBurstTimes` already record in each `<orbit>-<seq>` directory. Runs before
-`setupSeveralTopsImages.py`, which consumes `frames` and `orbitframes`.
+`catMultipleTops`/`computeBurstTimes` already record in each `<orbit>-<seq>` directory, then runs
+`setupSeveralTopsImages.py` over the framing it proposed — checking it in every mode, and building
+the setup scripts when the entries are committed.
 
-**This program never writes anything.** Every mode prints to the terminal, so it is safe to run
-against live track directories.
+**Nothing is written unless a write mode is asked for** — `-commit`, `-refreshLinks`, `-undo` or
+`-undoLinks`. Without one, every mode only prints to the terminal, so it is safe to run against
+live track directories. See [Writing the result](#writing-the-result) and
+[The setup step](#the-setup-step).
 
 Run from the track directory (the one holding `frames`, `orbitframes`, `ascending`/`descending`
 and the `<orbit>-<seq>` directories).
@@ -18,9 +21,13 @@ and the `<orbit>-<seq>` directories).
 segmentTrack.py [options]
 ```
 
-No positional arguments. With no options it proposes entries for the acquisitions that have not
-been framed yet — the same "no `<orbit>_<firstBurst>` directory" test `setupSeveralTopsImages`
-uses. Everything earlier in the record is used to learn the current starts.
+No positional arguments. With no options it re-derives the last 12 acquisitions, ignoring their
+existing `orbitframes` entries, and prints the proposal next to what was built. Only the
+acquisitions not yet built can be written; the rest are derived for the comparison alone.
+
+`-lookBack 0` gives the other behaviour: propose only for the acquisitions that have not been
+framed yet — the same "no `<orbit>_<firstBurst>` directory" test `setupSeveralTopsImages` uses —
+and list separately any matching pieces needed in acquisitions already framed.
 
 ---
 
@@ -28,7 +35,7 @@ uses. Everything earlier in the record is used to learn the current starts.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-lookBack N` | 0 | Re-derive the last N acquisitions, ignoring their existing `orbitframes` entries, and print the proposal next to what was built |
+| `-lookBack N` | 12 | Re-derive the last N acquisitions, ignoring their existing `orbitframes` entries, and print the proposal next to what was built; `0` proposes for the not-yet-framed acquisitions instead |
 | `-compare` | False | Re-derive the **whole** record and compare against the existing files |
 | `-dump` | False | Print the proposed entries for the whole record, as a complete replacement `orbitframes` |
 | `-plot` | False | Show the track as a plot (see below) |
@@ -37,71 +44,387 @@ uses. Everything earlier in the record is used to learn the current starts.
 | `-firstdate YYYY:MM:DD` | — | Only consider acquisitions on or after this date |
 | `-lastdate YYYY:MM:DD` | — | Only consider acquisitions on or before this date |
 | `-minBursts N` | 4 | Shortest piece worth building |
+| `-maxBursts N` | 76 | Longest piece worth cutting; a longer run is broken into equal pieces sharing a burst at each seam |
+| `-refBack N` | 3 | How many built acquisitions back count as this one's neighbours; 3 covers S1A/S1C/S1D interleaving. An older acquisition can still supply the framing where none of these covers the same bursts |
+| `-maxPairDays N` | 36 | Longest gap that still pairs where no data lies between, so a missed cycle or two still forms the 24- and 36-day pairs |
+| `-refSearch N` | 40 | How many older built acquisitions to consider where the neighbours frame little of this one |
 | `-mateSpan N` | 2 | Acquisitions each side that get a matching piece; 2 covers the 6-day and 12-day pairs |
-| `-maxMateDays N` | 13 | Furthest a matching piece is worth adding |
-| `-splitTol N` | 0 (off) | If > 0, a satellite starting more than this many bursts before the shared key also gets a piece at its own start (try 4) |
-| `-snapTol N` | 3 | Burst jitter treated as the same segmentation rather than a new one |
-| `-runLength N` | 3 | Repeats before a changed start becomes the anchor |
-| `-overrideFraction F` | 0.5 | Fraction of acquisitions overridden in `orbitframes` above which `frames` is treated as stale |
-| `-keyFraction F` | 0.5 | How often a second start in a region must be built, relative to the main one, to count as a frame of its own |
-| `-deriveWindow N` | 40 | How many recent acquisitions define the segmentation in use |
-| `-useFrames` | False | Take the segmentation from `frames` alone, ignoring the velocityStats regions |
-| `-keepBroken` | False | Propose pieces even when every frame of an acquisition missed its anchor |
+| `-maxMateDays N` | 13 | Furthest a matching piece is worth adding **where there is intervening data to pair with instead** |
+| `-snapTol N` | 3 | Burst jitter treated as the same segmentation; also how far two lengths for one key may differ before the shorter is taken and the surplus given its own piece |
+| `-boxOverrun N` | 5 | How far a piece invented here may run past a velocityStats box boundary before it is broken there instead |
+| `-deriveWindow N` | 40 | How many recent acquisitions the report describes as the current state of the track |
+
+### Write modes
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-commit` | False | Write the entries just proposed into `orbitframes` — replacing the lines of the not-yet-built orbits, appending to the built ones, leaving every other line alone — then build the setup scripts for them |
+| `-noSetup` | False | Stop after `orbitframes`: the framing is still checked with `setupSeveralTopsImages`, but no `setup_` scripts and no `runSetup` driver are written |
+| `-undo` | False | Restore the `orbitframes` from before the last `-commit`; repeat to step further back |
+| `-refreshLinks` | False | Link the assembled `<orbit>-<seq>` directories that have no link here yet |
+| `-linkAll` | False | With `-refreshLinks`, link every unlinked directory whatever its age |
+| `-undoLinks` | False | Remove the links made by the last `-refreshLinks` |
+| `-maxLinkAgeDays N` | 365 | `-refreshLinks` skips assembled directories older than this; from the nearest `project.yaml` `maxLinkAgeDays` key if there is one |
+| `-assemblyDir PATH` | inferred | Assembly track directory; from the nearest `project.yaml` `assemblyDir` key, else inferred from the existing links — where those point into more than one tree, the `project.yaml` `defaultAssemblyDirectory` key settles it |
+
+---
+
+## Writing the result
+
+The routine update is three steps:
+
+```
+segmentTrack.py -refreshLinks     # take in newly assembled acquisitions
+segmentTrack.py                   # read the proposal and its setup check
+segmentTrack.py -commit           # write it, and build the setup scripts
+```
+
+### `-refreshLinks`
+
+`setupTrack` builds `<orbit>-<seq>` under the **assembly** directory
+(`/Volumes/insar8/ian/Data/SentinelGreenland/track-N`, the `assemblyDir` in `autoupdate.yaml`),
+and the processing track directory reaches it through a per-orbit symlink. Nothing else creates
+those links, and segmentTrack cannot see an acquisition until one exists — a missing link
+silently shrinks the proposal rather than reporting anything.
+
+Only directories assembled within `-maxLinkAgeDays` (365 by default) are linked. Where a track
+was cut short years ago its old assembled directories were deliberately never linked, and
+linking them now would put long-dead acquisitions back into the record; the count skipped is
+reported, and `-linkAll` overrides it. The age comes from the **mtime of the assembled
+directory** — when it was put together — not the acquisition date, so processing ten-year-old
+data for a new region links normally.
+
+**Only directories that still hold their swath SLCs are linked.** Cleaning the SLCs away leaves
+the metadata behind — `.slc.par`, `.tops_par`, `.btimes`, `ascendingNodeTime`, the burst files —
+so the directory goes on looking assembled long after there is anything to cut a piece from.
+Linking one would put an acquisition into the record that no setup can build. The count is
+reported rather than passed over, since an acquisition missing from the proposal because its SLCs
+were cleaned looks exactly like one that was never assembled:
+
+```
+    337 assembled directories hold only metadata, their SLCs having been cleaned away, and cannot be built from: 10091-0 10137-0 ...
+```
+
+This applies to `-linkAll` too — that only overrides the age cutoff.
+
+An existing link is never replaced, including a broken one: it was made on purpose. Broken links
+are ignored when the assembly directory is inferred, so one cannot stop a run.
+
+A track moved between volumes over the years has links into both, and there is then no single
+directory to infer. Rather than stopping, which would leave the track unrefreshable, the choice is
+reported in bold and made from the nearest `project.yaml` **`defaultAssemblyDirectory`** key —
+joined with the track name, the tree the project is linked into now:
+
+```
+*** the existing links point into more than one assembly directory; taking the project.yaml defaultAssemblyDirectory -- pass -assemblyDir to use another:
+    --> /Volumes/insar8/ian/Data/SentinelGreenland/track-90 (300 links, newest 2026-08-11)
+        /Volumes/insar3/ian/Data/Sentinel1Greenland/track-90 (39 links, newest 2024-09-21)
+```
+
+Without that key, or where it names none of the directories this track is linked into, the **most
+recently assembled** one is taken instead: new assemblies land wherever the last one did, and that
+is the only place `-refreshLinks` has anything to find. `-assemblyDir` overrides either.
+
+`defaultAssemblyDirectory` is not an answer on its own, unlike `assemblyDir` — it only settles
+which of the directories a track is *already* linked into is the current one.
+
+### `-commit`
+
+Merges by orbit. Every line for an orbit the proposal covers is replaced; hand comments, blank
+lines and entries for orbits not proposed are kept exactly as they were. The provenance comments
+segmentTrack itself writes (`# <orbit>-<seq>/frames.<first>.<last>`) are replaced along with
+their entries, so committing twice leaves the file unchanged rather than stacking up copies.
+
+**An orbit framed exactly as `frames` gets no lines at all.** `determineFraming` starts from
+`frames` and applies the overrides on top, so the default already produces that framing and
+saying it again in `orbitframes` is noise. Such an orbit is left out of the proposal entirely and
+its part of the file is not touched.
+
+**An orbit that is listed states every `frames` index.** Once any one frame differs the whole
+default is in play, and a frame left unlisted quietly falls back to its `frames` entry — where
+the acquisition cannot cover that entry, `checkRange` finds no override and aborts the whole
+track. So if `frames` has 3 entries and only 2 chunks can be cut, the third is written as
+`<orbit>-3-<first>-0`; `NumberFrames` of 0 is how `setupSeveralTopsImages` is told to skip a
+frame. Extra frames (index above the number in `frames`) keep their own index and always force
+the orbit to be listed.
+
+The two rules together are framing-preserving: what `determineFraming` returns for every orbit is
+identical to what it returned before them, with the redundant lines gone.
+
+What gets committed is what was shown: the default `-lookBack 12` writes the re-derived tail,
+`-lookBack 0` writes the unframed acquisitions plus the matching pieces, and `-dump -commit`
+writes the whole record — still keeping hand entries for any orbit the proposal has nothing to
+say about. Because the default re-derives, a default `-commit` can **replace** entries for
+acquisitions already framed, not just add new ones; read the comparison table before committing.
+
+### The setup step
+
+Every mode but `-dump` finishes by running `setupSeveralTopsImages` over the framing just
+proposed. The proposal is merged into `orbitframes` **in memory** first — exactly the merge
+`-commit` would write — so the framing being checked is the one being proposed, whether or not it
+is committed.
+
+That first pass is a check: it writes nothing, and it runs the whole track rather than stopping at
+the first bad frame the way `setupSeveralTopsImages` does on its own, so one broken orbit no
+longer hides everything behind it. It reports how many pieces would be set up, how many are
+already built, and then every failure it found:
+
+```
+Checking the proposed framing with setupSeveralTopsImages (acquisitions since 2025-12-27, -firstdate reaches further back):
+    12 pieces would be set up, 30 already built
+    3 scripts for pieces never built lie outside these dates and were left alone: setup_57773_618 ...
+```
+
+**The setup step covers the last 3 months of the record**, counted back from the most recent
+acquisition that has been built. A track carries a decade of acquisitions, and the old ones were
+framed against SLCs that have been re-downloaded since, so checking them reports problems that are
+neither new nor worth fixing — and one of them would block the commit. `-firstdate` (with
+`-lastdate`) overrides the window: it already says which acquisitions to consider, so giving it is
+how an older stretch, or the whole record, is deliberately taken in. A track with nothing built
+yet is not narrowed at all.
+
+Setup scripts waiting on pieces outside those dates are reported and left alone — nothing in the
+window replaced them, so they are not cleaned away either.
+
+**If anything failed, nothing is written at all** — not `orbitframes`, not a single script — and
+the run exits non-zero:
+
+```
+*** setupSeveralTopsImages reports 1 problem with this framing:
+    4223-0 frame 9000-40: ***** Frames 9000 to 9039 for 4223-0 not in burst time range 623 to 668 ...
+
+nothing written -- neither orbitframes nor any setup script. Fix `frames` or `orbitframes` and run again.
+```
+
+The failures are reported in red, never worked around: the fix belongs in `frames` or
+`orbitframes` and is the user's call. The kinds are the ones `setupSeveralTopsImages` has always
+raised — a frame outside the burst range, a gap in the burst times, a missing `.btimes` file, an
+unreadable `ascendingNodeTime`.
+
+A burst-numbering slip never gets this far: it is repaired before the coverage is used — see
+[Slipped burst numbering](#slipped-burst-numbering).
+
+With a clean check and `-commit`, the entries are written and then the scripts:
+
+```
+    15 pieces set up, 109 already built
+    scripts listed in runSetup.Aug:17:26:08:31:09
+    removed 7 stale files: setup_57773_618 ... runSetup.Oct:16:25:16:28:46
+```
+
+**Repeat runs leave one current set.** After writing, the superseded setup scripts are removed —
+those of pieces never built (no `<orbit>_<firstBurst>` directory), for the orbits this run covered
+and not just written. Scripts for pieces already built are left alone: they are the record of how
+that piece was cut, and segmentTrack reads them for the burst count the directory name does not
+carry. Running twice therefore gives the same scripts, not a pile of them for framings that were
+superseded.
+
+An earlier `runSetup.*` is removed **only when this run has made it redundant** — every script it
+lists is either being written again now or has since been built. Age is not the test: a run file
+still pointing at a piece nobody has built is the only record of that work, so it is kept and the
+reason printed:
+
+```
+    removed 3 superseded files: runSetup.Feb:08:26:14:30:29 runSetup.Feb:23:26:08:35:12 ...
+    kept runSetup.Oct:16:25:16:28:46: 3 pieces it lists are neither built nor in this run: setup_57773_618 ...
+```
+
+A file that overlaps this run only partly is kept for the same reason — the overlapping half is
+regenerated, and re-running a setup script is harmless, but the rest of it exists nowhere else.
+
+`-noSetup` stops after `orbitframes`: the check still runs, so the entries are still validated
+before they are written, but no scripts are produced.
+
+### `-undo` and `-undoLinks`
+
+Each `-commit` first copies `orbitframes` to `orbitframesBackup/orbitframes.bak.<stamp>`, and
+`-refreshLinks` records what it created in `orbitframesBackup/links.<stamp>`. `-undo` restores
+the newest backup and drops it, so repeating it steps further back; `-undoLinks` removes the
+links from the last refresh, leaving alone any that have been repointed by hand since. The two
+are separate: `-undo` never touches links.
+
+---
+
+## Slipped burst numbering
+
+A directory whose burst numbers do not run consecutively cannot be framed —
+`setupSeveralTopsImages.checkBurstTimes` aborts the whole track on it. Usually nothing is actually
+missing: `computeBurstTimes` used to round each burst separately, so a swath whose times sit near
+a half-period boundary numbered two bursts the same, or stepped over one (see
+[computeBurstTimes](computeBurstTimes.md#how-bursts-are-numbered)).
+
+Those are repaired **before anything is derived from the coverage**, so the acquisition is framed
+in the same run:
+
+```
+*** 7342-0: the burst numbering was wrong and has been corrected
+    20260423-0_iw1_hh.btimes: corrected from burst 8: burst number 647 was counted twice, so 647 -> 648 and +1 to the end (last burst 677 -> 678)
+4 acquisitions, 2026-04-11 to 2026-05-17
+...
+committed 4 entries for 4 orbits
+```
+
+Only directories this run would actually segment are touched — never a sweep of the tree, and
+never one whose SLCs have been cleaned away. Three cases are reported and left alone:
+
+- recomputing gives the same numbering, so the bursts really are missing and nothing can be built
+  from that directory (reported in red as a hole, and it still stops the setup check);
+- recomputing would move the *first* burst number, which is the piece key;
+- the `.tops_par` files or `ascendingNodeTime` are not there to recompute from.
+
+`-dump` skips the repair, so it stays a clean replacement `orbitframes` on stdout.
+
+---
+
+## Stale links
+
+Most of a mature track has been cleaned: the SLCs are deleted once the pieces are built, leaving
+the `.slc.par`, `.tops_par`, `.btimes`, `ascendingNodeTime` and burst files behind. Those
+directories still parse, so they used to be framed like any other — and the setup step then wrote
+`setup_` scripts for pieces nothing could build.
+
+A linked directory with no swath SLCs left is now **kept as history but never proposed for**:
+
+- its burst coverage still feeds `historicalRange`, the framing carried forward and the
+  recent-acquisitions window, which is what the whole proposal is learned from;
+- no piece is proposed for it and no matching piece is given to it;
+- `-lookBack 0` does not count it as an unframed acquisition to do work for;
+- the setup step skips it, so no `setup_` script is written for it.
+
+The count is reported up front:
+
+```
+80 acquisitions, 2015-01-18 to 2026-03-27
+77 linked directories hold only metadata, their SLCs having been cleaned away; the 77 acquisitions
+with nothing left to cut still count towards the history, but nothing is proposed or set up for them
+```
+
+`-refreshLinks` applies the same test before making a link at all (see above), so a track linked
+from scratch does not take in hundreds of empty directories.
 
 ---
 
 ## Where the segmentation comes from
 
-`frames` is written once and goes stale as coverage is extended over the years, so it is not
-trusted blindly:
+The framing is **carried forward from the last built acquisition that matches**, not derived from
+the record at large. What matters is that a new acquisition pairs with the ones around it, and a
+pair only forms where two acquisitions carry the same `firstBurst`, so the acquisition just before
+this one is the only thing that can define its keys.
 
-- **Short `orbitframes`** (below `-overrideFraction`) means `frames` has been describing the track
-  fine and is used as-is.
-- **Most acquisitions overridden** means `frames` is the stale one. The segmentation is then taken
-  from the `velocityStats/<lo>-<hi>` directories combined with the starts and lengths actually in
-  use.
+**Which one** is decided by `carriedCoverage`: how many of this acquisition's bursts each
+candidate's keys would actually cut, once each key is trimmed to the data. Among candidates within
+a margin of the best, the **most recent wins** — the framing in current use is the one to carry on.
+The satellites interleave and do not cover the same bursts, so this is what keeps them apart: on
+track-31 S1A's keys (413, 442) cut 82 of S1C's 98 bursts where S1C's own (398, 442) cut all 98, so
+S1C keeps its own framing. Its `-refBack` neighbours are all considered, which is what lets a
+coverage that comes round every second or third acquisition find its match.
 
-A velocityStats directory is how the data are **bunched for the autocleaning**, so its range can
-hold **one or more** frames — the count is derived from the data, never assumed to be one. Within
-each region:
+Coverage *equality* is the wrong test, and was the first thing tried: track-163's orbit 63410
+covers 355-436 and the framing that fits it is the 2022 one, `358-60` alongside `417-62`, whose own
+acquisitions ran to 478. Trimmed to 436 that is exactly what 63410 was built as, but an equality
+test rejected it in favour of an older acquisition that happened to stop in the same place.
 
-- Every start with a real history there becomes a frame, not just the most used one. A region
-  routinely carries several keys: the two satellites are staggered (track-127 runs 644 alongside
-  649), or a frame is deliberately cut in two (track-83 runs 668 alongside 671). Dropping a
-  long-standing key would orphan every piece already built on it. "Real history" means built at
-  least `keyFraction` as often as the region's main start — a genuine second key belongs to one of
-  the two satellites and so appears in roughly half the acquisitions, whereas a looser threshold
-  turns one-offs into frames and over-produces.
-- The **start** counts only the last 40 acquisitions, so one abandoned years ago does not come
-  back.
-- The **length** is the furthest that start has been taken **within the same window**, from the
-  `setup_` scripts and the `orbitframes` entries of those acquisitions. The furthest ever is too
-  generous: track-3 cut `452` to 24 bursts on four orbits years ago and to 19 or 20 ever since, so
-  the all-time maximum would add five bursts of ocean to every new frame.
-- A region nothing starts in any more gets no frame rather than an invented one.
+Where nothing is close enough to pair with at all, the most recent built acquisitions are tried
+first all the same — they are still the framing in use. Picking on coverage across the whole record
+instead hands the framing to whichever old one cuts the most ground: track-61 stopped cutting bursts
+355-374 in 2025, so a framing from before that covers *more* of an acquisition than the one actually
+in use, and reaching back for it dropped the `429` key the rest of the track pairs on.
 
-Where a region carries several keys and one of them cannot be reached in an acquisition, that
-frame is skipped rather than re-anchored: re-anchoring exists to rescue data that would otherwise
-be lost, and a sibling key in the same region already covers it. For the same reason a re-anchor
-that would land within `stubGap` of another frame's key is dropped — that is the same cut
-jittered, not a new one.
+Where the neighbours frame **less than `REACHBACKFRACTION` (0.5) of this acquisition's own data**
+and an older framing covers more, the framing is taken from the older one instead. On track-163 the
+acquisition six days before 63410 is 22 bursts long and frames 12 of its 82; without this, 63410
+came out as five pieces, four of them stubs. The test is against the acquisition's own data rather
+than against the best framing available, so a track whose framing is merely in the middle of
+changing does not trip it. How far back it reached is reported, and where that is beyond
+`-maxPairDays` it is called out — the series it carries on stopped that long ago, so the new pieces
+pair only with each other.
 
-### Keys no frame produces
+**How close counts as a pair** is `pairable()`: 12 days is the repeat, and where a cycle or two
+has been missed the 24- and 36-day pairs are still worth forming, but only where nothing lies
+between — with intervening data, that is what each of them pairs with. The gaps are not only
+multiples of 6 and 12: with S1A, S1C and S1D all operating (April–June 2026) pairs a day apart
+turn up.
 
-Whichever way the segmentation was arrived at, a start still being built that **no frame produces**
-is kept as a frame of its own, and the gap is reported:
+This is what makes the two pairings work together. On track-31 the shared key `442` gives the
+6-day S1A↔S1C pair over 442-494, while `398` (S1C only) and `413` (S1A only) each pair their own
+satellite twelve days apart over 398-441 and 413-441. The 12-day keys sit **inside** the ground a
+6-day key covers, which is why an overlap is not treated as redundancy (below).
 
-```
-(no frame covers it)  ->  frame-662-10  (built for 20 of the last 40)
-```
+**Lengths** are reconciled across the neighbouring framings, but **only a piece that stopped
+short of its own data counts**. One that ran to the end of its acquisition was simply trimmed
+there and says nothing about how the key is framed: on track-148 S1A stops at 408 and cuts `373` to
+36 bursts where S1C runs it to 50, and on track-163 a 22-burst acquisition cuts `358` to 12.
+Reading either as a framing decision shortens the key for everyone and leaves a gap behind it to be
+filled with stubs — which is exactly what both tracks showed. Among the pieces that do count:
 
-This matters more than tidiness: abandoning such a key stops the series running on it, which on a
-two-key track halves the pairs. It catches both a key falling outside every velocityStats region
-(track-83 builds 576, below its first region) and a key inside a region that simply has no frame
-cut there (track-68 builds 662 where `frames` names only 671). Note that "covered" means a frame
-actually produces the start — a region merely bracketing it is not enough.
+- Differing by no more than `snapTol` — `442-54` next to a `442-53` — the longer is taken, and an
+  acquisition whose data cannot reach it is simply shortened. Only the start names the directory,
+  so a piece a burst or two short still pairs.
+- Differing systematically — `54, 34, 54, 34` — the **shorter** is taken, so every acquisition
+  pairs over the whole of its piece, and the surplus becomes a piece of its own at the seam
+  (`442-34` on all of them, plus `475-21` on the long ones).
 
-The derived segmentation is printed at the top of every run.
+An established key is otherwise left exactly as it was cut, boxes and all: the framing stays the
+one the track has been processed on.
+
+### A key that falls before the data
+
+Coverage steps around over the years, and a key can end up before the first burst an acquisition
+holds — track-45 was cut on 419 for years until the coverage began at 421 instead. Dropping the
+key loses that ground for good, so where the frame still reaches into the data the piece is
+**moved onto the first burst there is**. A start that moves makes a new key, but the acquisitions
+around it move the same way, so the new key pairs; on track-45 every acquisition since has been
+cut on one.
+
+The moved start then **snaps to a start the track already uses** where one is within `snapTol`,
+in preference to the first burst of the data: that is a key pieces exist on and pair with, where
+the first burst is a key of nobody's. Track-45's data begins at 421 and its run was cut at 422,
+which is what the snap reproduces.
+
+Without this the key was simply unreachable, every recent acquisition scored zero coverage, and
+the reach-back below fired and framed orbit 41067 off an acquisition from 2016.
+
+### What may be invented, and how far
+
+A piece this run invents — surplus at a seam, or the early bursts of a satellite whose keys have
+not been seen yet — is held inside **the ground the reference acquisitions were actually cut
+over**. Coverage past that has been left out on purpose (ocean, or somewhere of no interest) and
+the record is emphatic about it: over the 30 Greenland tracks, picking surplus coverage up
+invented keys that were proposed 120 times and built never. Ground a neighbour *did* cut is the
+opposite case — that is the surplus of a key that has been shortened, and it does want a piece.
+
+Invented pieces are also cut to sit inside the **velocityStats boxes**. The autocleaning works box
+by box, so a piece straddling two is cleaned against bounds that are not its own: where the track
+is cut at 0-50 and 51-100, two pieces of 25-50 and 51-100 sit inside their boxes and one piece of
+25-75 does not. A piece running past a boundary by no more than `-boxOverrun` is left whole, since
+cutting there would leave a stub rather than a piece.
+
+No piece is longer than `-maxBursts` (76). A longer run is broken into equal pieces sharing a
+burst at each seam — the same one-burst overlap the tracks already carry, where `398-45` ends on
+442 and `442-54` starts on it.
+
+A piece another piece already covers is dropped, **unless it is a key in its own right**: the
+12-day keys above are exactly the case where the same ground is cut twice on purpose. Two pieces
+on the same start always collapse to the longer, being one directory cut twice.
+
+### Acquisitions already built are never rewritten
+
+Only the acquisitions after the last built one are framed for writing. An acquisition that has
+been built already has `orbitframes` lines describing directories that exist and pair, and
+rewriting them would orphan what was built from them. Its framing is still derived — that is what
+the comparison table is read against — but the only thing ever written for it is an **extra piece
+appended** after its existing lines, where a key introduced further along needs a partner to pair
+with. `-commit` reports these separately, and they take an index above everything that orbit
+already uses so `determineFraming` adds them rather than replacing part of its framing.
+
+### How well the rules reproduce the record
+
+Scored over the whole record of all 30 Greenland tracks — 2500 built acquisitions — the rules
+reproduce the set of keys actually built for **92.0%** of them exactly, and the framing they derive
+would form **3279 pairs against the 3011** the built segmentation forms. The residual divergences
+are 3-13 occurrences on a single key of a single track, which is the same order as the occasional
+hand slip in the record itself; the deliberate one is the shortened shared key above, which
+departs from history in order to pair over the whole piece.
 
 Nothing is proposed outside the **historical extent** — the furthest the track has ever been cut.
 That boundary is normally a deliberate choice rather than an accident: acquisitions routinely run
@@ -125,25 +448,37 @@ that name exactly. So **`firstBurst` is the pairing key and `nBursts` is free** 
 shortened as much as the data requires and still pair, but a shifted start makes a new key and
 needs matching pieces in the neighbouring acquisitions before any pair can form.
 
+What is being maximised is the pairs: the nearest-neighbour (6-day) pair, and the alternating
+(12-day) pair where there is 6-day data — the two can be framed differently, and a long 12-day
+piece overlapping a 6-day one is perfectly viable. Against that, the framing is kept close to the
+historical one, because the autocleaning boxes were set up around it.
+
 Rules applied, in the order they matter:
 
-1. **Trim, don't move.** If only the tail is missing, shorten the piece and keep the start.
-2. **Skip** (`nBursts=0`) when nothing usable is left inside the frame.
-3. **Stay inside the frame.** A piece never extends past its frame end, and a run covering two
-   frames yields a piece in each rather than one straddling piece — the autocleaning works on
-   per-frame bounded regions. Where the velocityStats regions are known they set how early a piece
-   may start, since any start inside a region is legitimate.
-4. **Learn the start**, as described above. `frames` is never modified.
-5. **Re-anchor on a persistent change**, not a one-off: the next `runLength` acquisitions must
-   agree to within `snapTol`. Bridging pieces are added across the changeover.
-6. **Matching pieces.** A one-off shifted start is copied into the neighbouring acquisitions within
-   `mateSpan`/`maxMateDays` so it can pair.
-7. **Stagger** (opt-in, `-splitTol 4`). Where one satellite's bursts systematically start well
-   before the shared key, it also gets a piece at its own start: the shared key pairs it across
-   missions, its own start pairs it down its own series.
-8. **Broken acquisitions.** If every frame of a multi-frame track missed its start, the acquisition
-   is skipped and reported rather than rescued — it needs re-downloading, and rescuing it would add
-   a new key to every neighbour.
+1. **Carry the keys forward** from the neighbour whose framing cuts the most of this
+   acquisition's data, most recent among equals; reaching back past the `refBack` neighbours only
+   where they frame less than half of it. `frames` is never modified, and is only the starting
+   point for a track with nothing built yet.
+2. **Trim, don't move.** If only the tail is missing, shorten the piece and keep the start — the
+   start is the pairing key, the length is free. A key that falls *before* the data is the one
+   case where a start does move: onto the first burst available, snapped to an established start
+   within `snapTol`.
+3. **Skip** (`nBursts=0`) where the data cannot carry a key at all.
+4. **Reconcile the lengths**, counting only pieces that stopped short of their own data: the longer where they differ by no more
+   than `snapTol`, the shorter where the difference is systematic, with the surplus taken up as
+   its own piece at the seam.
+5. **Invent only inside cut ground**, and cut it to the velocityStats boxes (`boxOverrun`).
+6. **Cap at `maxBursts`**, breaking with a shared burst at the seam.
+7. **Drop a piece another already covers**, unless it is a key in its own right — the 6-day and
+   12-day keys overlap on purpose.
+8. **Matching pieces.** A key that nothing else carries is given a partner in the built
+   acquisitions **either side** of it, within `mateSpan`/`pairable`, appended to what those already
+   have. Each side is a pair of its own, so a key the acquisition before it carries still wants one
+   in the acquisition after — on a new key that is the difference between one pair and two. Where
+   the key belongs to an acquisition whose SLCs have been cleaned away the partners are still
+   worked out and drawn, so the plot shows the pairing the rules would have produced, but they are
+   **never written**: the acquisition they would pair with is one nothing can be cut from.
+9. **Never rewrite a built acquisition.** Its lines stay as they are; only additions are written.
 
 ---
 
@@ -174,7 +509,21 @@ text output rather than replacing it. Each row carries three things:
 - the **datatake coverage**, one band per `<orbit>-<seq>` directory coloured by its sequence
   number with a legend, so a split datatake shows as two colours on the same row;
 - the **pieces already built**, dark, above the coverage;
-- the **pieces that would be cut**, in crimson, below it.
+- the **pieces that would be cut**, in crimson, below it. Every acquisition is framed and drawn,
+  since reading the derivation against what was built is most of the point of the plot, but only
+  the acquisitions not yet built would actually be written: the rest are faded and labelled
+  *proposed, outdated*. An acquisition already built keeps its own lines whatever the derivation
+  says, and one whose SLCs have been cleaned away has nothing left to cut. On a mature track the
+  faded rows are most of the record, and the solid ones are the work in hand;
+- **bursts an acquisition cuts twice**, drawn on a lane of their own — offset above the built band
+  or below the proposed one — and outlined in orange. Superimposing them only looked like a single
+  piece, so the piece covering ground another piece of the same acquisition already covers is
+  stepped clear of it instead. Only a band that doubles is thinned to make room for the lane —
+  everywhere else the segments are drawn full height, in the place they always were. A one-burst
+  seam is not treated as a doubling, being how
+  neighbouring pieces are meant to meet; anything wider is the same ground cut, processed and
+  mosaicked twice. That is legitimate where a 12-day key sits inside a 6-day one, and is what a
+  stray nested piece looks like otherwise.
 
 Built and proposed segments alternate their fill (plain, hatched, dotted) and carry a white edge,
 because pieces cut back to back would otherwise read as one long piece. Dashed vertical lines mark
@@ -189,6 +538,20 @@ apart, which collapses the rows into two distant bands; the labels therefore run
 
 Combine with `-lookBack N` to narrow the plot to the last N acquisitions — a decade on one axis is
 unreadable.
+
+### Committing from the plot
+
+An interactive `-plot` run that was not given `-commit` carries two buttons under the axes:
+
+| Button | What it does |
+|--------|--------------|
+| **commit** | Writes the entries just checked and builds their setup scripts — the same write step `-commit` would have taken — then closes the window so the terminal reports what happened |
+| **exit** | Closes the window, writing nothing |
+
+The plot is where a proposal is judged, so the answer is given there rather than by reading it,
+closing it and running the whole thing again with `-commit`. What the button commits is the
+framing whose check has already passed: a run whose check reported a problem has nothing to
+commit, so it gets no buttons. `-plotFile` gets none either, being a saved image.
 
 ---
 

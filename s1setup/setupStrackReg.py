@@ -23,7 +23,7 @@ def setupStrackRegArgs():
     ''' Handle command line args'''
     myFlags = {'cwOffsets': True, 'simOffsets': True, 'strackReg': True,
                'strackOffsets': False, 'cullOnly': False, 'setupOnly': False,
-               'simOnly': False, 'tiff': False}
+               'simOnly': False, 'tiff': True}
     parser = argparse.ArgumentParser(description='\033[1mRun registration'
                                      ' procedure [default] or main speckle'
                                      ' tracker\033[0m',
@@ -57,10 +57,17 @@ def setupStrackRegArgs():
     parser.add_argument('--cullOnly', action='store_true', default=False,
                         help='\033[1mOnly cull on high res offsets '
                         '(must be called with --strackOffsets) \033[0m')
-    parser.add_argument('--tiff', action='store_true', default=False,
+    parser.add_argument('--noTiff', action='store_true', default=False,
                         help='Write the main speckle-tracked offsets, cull and '
-                        'interp outputs as GeoTIFF + tiff-backed VRT '
-                        '(default: raw binary)')
+                        'interp outputs as raw binary instead of the default '
+                        'GeoTIFF + tiff-backed VRT')
+    #
+    # Now what happens anyway; kept so the runboth/dofast scripts already
+    # written with it, and anything else passing it, keep working
+    #
+    parser.add_argument('--tiff', action='store_true', default=False,
+                        help='(now the default -- accepted for existing '
+                        'callers)')
     #
     args = parser.parse_args()
     # log arguments
@@ -101,7 +108,7 @@ def setupStrackRegArgs():
     if orbit1 < 0 or orbit1 > 200000 or orbit2 < 0 or orbit2 > 200000:
         u.myerror(f'Invalid Orbit {args.orbit1} {args.orbit2}')
     myFlags['info'] = args.info
-    myFlags['tiff'] = args.tiff
+    myFlags['tiff'] = not args.noTiff
     return orbit1, orbit2, args.frame, sensor, region, myFlags
 
 
@@ -254,20 +261,46 @@ def makeStrackRegBase(slcFiles1, slcFiles2, orbit1, orbit2, frame, sensor):
     s.makeBaseParams(insarInfo, nAzLines, suffix='.reg')
 
 
-def runStrackRegister(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame):
+def simOffsetsExist(offsetsRoot):
+    ''' True if the simulated offsets for offsetsRoot are on disk in either
+    form: the tiff-backed vrt written by simoffsets.py --tiff, or the legacy
+    raw .da. Testing only for the raw file silently dropped the simulated
+    initial guess in tiff mode and fell through to a register.offsets.<scale>
+    that does not exist on the first pass. '''
+    return os.path.exists(f'{offsetsRoot}.vrt') or \
+        os.path.exists(f'{offsetsRoot}.da')
+
+
+def maskFileAndVrt(offsetsRoot, tiff=False):
+    ''' Locate the tracking mask for offsetsRoot, returning (maskFile, maskVrt).
+
+    siminsar -tiff writes <root>.mask.tif + <root>.mask.vrt with no raw <root>.mask,
+    and strack reads the vrt in preference to the raw file (getMask.c), so in tiff
+    mode the vrt has to be handed to setupStrackInput -- without it writeMaskFile
+    emits only offsetmaskfile/offsetmaskdat and strack falls back to a raw mask that
+    is no longer there. Returns (None, None) when no mask exists in either form. '''
+    maskFile = f'{offsetsRoot}.mask'
+    maskVrt = f'{maskFile}.vrt'
+    if tiff and os.path.exists(maskVrt):
+        return maskFile, maskVrt
+    if os.path.exists(maskFile):
+        return maskFile, None
+    return None, None
+
+
+def runStrackRegister(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
+                      tiff=False):
     ''' run strack to co-register are low resolution.
     If necessary run multiple times on low res slc'''
     myLog.logEntry('runStrackRegister')
     subSLC = sensorInfo['subSLC']
-    maskFile = None
-    if os.path.exists(sensorInfo['offsetsRegBase']+'.mask'):
-        maskFile = sensorInfo['offsetsRegBase']+'.mask'
+    maskFile, maskVrt = maskFileAndVrt(sensorInfo['offsetsRegBase'], tiff=tiff)
     first, lastScale = True, 0
     #
     # Main loop to run tracker
     for scaleFactor in subSLC:
-        if first and os.path.exists('offsets.reg.da'):
-            initShifts = 'offsets.reg'
+        if first and simOffsetsExist(sensorInfo['offsetsRegBase']):
+            initShifts = sensorInfo['offsetsRegBase']
         else:
             initShifts = f'register.offsets.{lastScale}'
         print(initShifts)
@@ -281,7 +314,8 @@ def runStrackRegister(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame):
                                                     frame, scaleFactor,
                                                     initShifts, maskFile,
                                                     register=True,
-                                                    myLogger=myLog)
+                                                    myLogger=myLog,
+                                                    maskVrt=maskVrt)
         #
         first = False
         lastScale = scaleFactor
@@ -290,31 +324,22 @@ def runStrackRegister(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame):
             myArgs.append('-noComplex')
         if sensorInfo['IntegerComplex']:
             myArgs.append('-integerComplex')
+        if tiff:
+            myArgs.append('-tiff')
         myArgs.append(strackFile)
         # run strack
         u.callMyProg('strack', myArgs=myArgs, screen=True, logger=myLog)
         # run cull
         cullFile = s.makeCullFile(sensorInfo, offsetFile, orbit1, orbit2,
-                                  frame, scaleFactor, register=True)
+                                  frame, scaleFactor, register=True, tiff=tiff)
         u.callMyProg('csh', myArgs=[cullFile], screen=True, logger=myLog)
     myLog.logEntry('runStrackRegister')
 
 
-def makeCleanOff(offsetFile, sensor, tiff=False):
-    ''' make file to run cleanoff.py and cleanoffmerge.py'''
-    # create file
-    tiffFlag = ' --tiff' if tiff else ''
-    fp = open('cleanoff', 'w')
-    print('#', file=fp)
-    print(f'cleanoff.py {offsetFile}.cull.interp.da{tiffFlag}', file=fp)
-    print('#', file=fp)
-    print(f'cleanoffmerge.py --sensor {sensor}{tiffFlag}', file=fp)
-    print('#', file=fp)
-    print('qaoffsets.py', file=fp)
-    print('#', file=fp)
-    fp.close()
-    #
-    os.chmod('cleanoff', os.stat('cleanoff').st_mode | stat.S_IEXEC)
+# Moved to sarfunc.makeCullFile beside makeCullFile so it can be reused without
+# importing this module (which opens a log file at import). Re-exported here so
+# the call site below and any external caller are unchanged.
+makeCleanOff = s.makeCleanOff
 
 
 def runCullHiRes(sensorInfo, orbit1, orbit2, frame, tiff=False):
@@ -338,9 +363,7 @@ def runStrack(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
     myLog.logEntry('runStrack')
     initShifts = sensorInfo['registerBase']
     # mask file setup
-    maskFile = None
-    if os.path.exists(sensorInfo['offsetsBase']+'.mask'):
-        maskFile = sensorInfo['offsetsBase']+'.mask'
+    maskFile, maskVrt = maskFileAndVrt(sensorInfo['offsetsBase'], tiff=tiff)
     # initial shifts file
     for suffix in ['.da', '.dr', '.vrt']:
         if not os.path.exists(initShifts+suffix):
@@ -359,7 +382,8 @@ def runStrack(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
                                                 sensorInfo, orbit1, orbit2,
                                                 frame, scaleFactor, initShifts,
                                                 maskFile, myLogger=myLog,
-                                                setupOnly=setupOnly)
+                                                setupOnly=setupOnly,
+                                                maskVrt=maskVrt)
     # setup command
     myArgs = []
     if sensorInfo['IntegerComplex']:
@@ -424,7 +448,8 @@ def printInfo(orbit1, orbit2, frame, slcFiles1, slcFiles2, sensorInfo,
             else:
                 print('\033[1musing \033[35;1m with only a baseline ramp '
                       'removed.\033[0m ')
-        if os.path.exists(sensorInfo['offsetsBase']+'.mask'):
+        if maskFileAndVrt(sensorInfo['offsetsBase'],
+                          tiff=myFlags['tiff'])[0] is not None:
             print(f'\033[1m\nMatcher will use the mask information in: '
                   f'\033[35;1m {sensorInfo["offsetsBase"]}.mask.\033[0m')
     else:
@@ -441,7 +466,8 @@ def printInfo(orbit1, orbit2, frame, slcFiles1, slcFiles2, sensorInfo,
               f'{myFlags["simOffsets"]} \033[0m')
         print(f'\033[1mSetup offsets strackReg: \033[35;1m '
               f'{myFlags["strackReg"]} \033[0m')
-        if os.path.exists(sensorInfo['offsetsRegBase']+'.mask'):
+        if maskFileAndVrt(sensorInfo['offsetsRegBase'],
+                          tiff=myFlags['tiff'])[0] is not None:
             print(f'\033[1m\nMatcher will use the mask info in\033[35;1m'
                   f'{sensorInfo["offsetsRegBase"]+".mask"}.\033[0m')
     print('Exiting - rerun with no --info flag\n')
@@ -514,7 +540,7 @@ def main():
     # compute fine res reg offsets
     if myFlags['strackReg']:
         runStrackRegister(slcFiles1, slcFiles2, sensorInfo,
-                          orbit1, orbit2, frame)
+                          orbit1, orbit2, frame, tiff=myFlags['tiff'])
     #
     # run the offset tracker
     if myFlags['strackOffsets'] and not myFlags['cullOnly']:

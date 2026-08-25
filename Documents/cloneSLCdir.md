@@ -13,7 +13,7 @@ cloneSLCdir [options] track sensor
 | Argument | Description |
 |----------|-------------|
 | `track` | Track directory name (must contain `track` and `-`, e.g., `track-90`) |
-| `sensor` | Sensor to clone: `S1A`, `S1B`, or `S1C` |
+| `sensor` | Sensor to clone: `S1A`, `S1B`, `S1C`, or `S1D` |
 
 ---
 

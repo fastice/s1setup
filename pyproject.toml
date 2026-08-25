@@ -19,7 +19,9 @@ dependencies = [
     "utilities",
     "numpy",
     "pyyaml",
-    "asfSearchAndDownload"
+    "asfSearchAndDownload",
+    "beautifulsoup4",
+    "lxml"
 ]
 
 [tool.setuptools]
@@ -42,6 +44,10 @@ trimTopsSLCsToFit = "s1setup.trimTopsSLCsToFit:main"
 "trimTopsSLCsToFit.py" = "s1setup.trimTopsSLCsToFit:main"
 setupTrack = "s1setup.setupTrack:main"
 "setupTrack.py" = "s1setup.setupTrack:main"
+setupS1Tracks = "s1setup.setupS1Tracks:main"
+"setupS1Tracks.py" = "s1setup.setupS1Tracks:main"
+updateOffsetsToTiff = "s1setup.updateOffsetsToTiff:main"
+"updateOffsetsToTiff.py" = "s1setup.updateOffsetsToTiff:main"
 segmentTrack = "s1setup.segmentTrack:main"
 "segmentTrack.py" = "s1setup.segmentTrack:main"
 setupSeveralTopsImages = "s1setup.setupSeveralTopsImages:main"
@@ -58,3 +64,7 @@ radcalcoeffs = "s1setup.radcalcoeffs:main"
 "radcalcoeffs.py" = "s1setup.radcalcoeffs:main"
 runPreProcTops = "s1setup.runPreProcTops:main"
 "runPreProcTops.py" = "s1setup.runPreProcTops:main"
+reprocessS1 = "s1setup.reprocessS1:main"
+"reprocessS1.py" = "s1setup.reprocessS1:main"
+dequeuePboss = "s1setup.dequeuePboss:main"
+"dequeuePboss.py" = "s1setup.dequeuePboss:main"

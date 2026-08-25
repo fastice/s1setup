@@ -33,8 +33,15 @@ setupStrackReg.py orbit1 orbit2 sensor [options]
 | `--strackOffsets` | False | Run full speckle tracking (disables all registration steps) |
 | `--setupOnly` | False | Set up `strack` input files but do not execute the tracker |
 | `--cullOnly` | False | Only cull high-resolution offsets (use with `--strackOffsets`) |
+| `--noTiff` | False | Write the main speckle-tracked offsets, the simulated offsets, and the cull/interp outputs as raw binary instead of the default GeoTIFF + tiff-backed VRT |
+| `--tiff` | — | Accepted for existing callers (the `runboth`/`dofast` scripts `setupSARpair.py` writes with it), and does nothing now that GeoTIFF is the default |
 
 Default (no flags): runs `cwOffsets` + `simOffsets` + `strackReg` (full registration pipeline).
+
+**Output format.** GeoTIFF + tiff-backed VRT, unless `--noTiff` is given. The flag is passed
+straight through to the steps that write offsets — `simoffsets.py --tiff`, `strack -tiff`, and the
+generated `cleanoff`/`cleanoffmerge.py` scripts — so the whole chain stays in one format. In tiff
+mode `runStrack` also validates the `.vrt` it produced, since no raw `.da` is written to check.
 
 ---
 
