@@ -72,6 +72,10 @@ def setupStrackRegArgs():
     args = parser.parse_args()
     # log arguments
     myLog.logArgs(args)
+    # logArgs dumps the raw namespace, in which the deprecated --tiff no-op
+    # always reads 'tiff = False' even when tiff mode is on -- which reads as
+    # the opposite of what happens. Log what actually takes effect.
+    myLog.logLine(f'EFFECTIVE: tiff = {not args.noTiff}')
     #
     # already registered, so do offset matching
     if args.strackOffsets:
@@ -271,6 +275,21 @@ def simOffsetsExist(offsetsRoot):
         os.path.exists(f'{offsetsRoot}.da')
 
 
+def initShiftsExist(initShifts):
+    ''' True if the initial-shift offsets strack needs are on disk in either
+    form. strack resolves initshift through checkForVrt (readBothOffsetsStrack.c),
+    so the tiff-backed <root>.vrt is enough -- regOffsetsMerge in tiff mode
+    writes only <root>.da.tif/.dr.tif and no raw pair. The legacy paths still
+    accept both raws, or the pair of .dat sidecars a pre-vrt directory carries.
+    '''
+    if os.path.exists(f'{initShifts}.vrt'):
+        return True
+    if os.path.exists(f'{initShifts}.da') and os.path.exists(f'{initShifts}.dr'):
+        return True
+    return os.path.exists(f'{initShifts}.da.dat') and \
+        os.path.exists(f'{initShifts}.dr.dat')
+
+
 def maskFileAndVrt(offsetsRoot, tiff=False):
     ''' Locate the tracking mask for offsetsRoot, returning (maskFile, maskVrt).
 
@@ -365,17 +384,10 @@ def runStrack(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
     # mask file setup
     maskFile, maskVrt = maskFileAndVrt(sensorInfo['offsetsBase'], tiff=tiff)
     # initial shifts file
-    for suffix in ['.da', '.dr', '.vrt']:
-        if not os.path.exists(initShifts+suffix):
-            # if not vrt, check if dates exist
-            if suffix == '.vrt':
-                for datSuffix in ['.da.dat', '.dr.dat']:
-                    if not os.path.exists(initShifts+suffix):
-                        u.myerror('Cannot start strack, missing '
-                                  f'{initShifts+datSuffix}')
-            else:
-                u.myerror(f'Cannot start strack, missing {initShifts+suffix}')
-        # create strack input file
+    if not initShiftsExist(initShifts):
+        u.myerror(f'Cannot start strack, missing {initShifts} offsets '
+                  f'(no {initShifts}.vrt, no raw .da/.dr, no .dat sidecars)')
+    # create strack input file
     scaleFactor = 1
     # added verify to avoid some steps when doing cull only
     strackFile, offsetFile = s.setupStrackInput(slcFiles1, slcFiles2,

@@ -32,6 +32,7 @@ rollback copy stays with the frame it came from. --dryRun reports and touches
 nothing. Already tiff-backed VRTs are skipped, so re-running is a no-op.
 """
 import argparse
+import fnmatch
 import glob
 import os
 import re
@@ -65,6 +66,17 @@ CHDIR_LOCK = threading.Lock()
 # --debug writes the originals into this subdirectory of the frame dir itself,
 # so the rollback copy travels with the frame it belongs to.
 DEBUG_DIR = 'debug'
+
+# ---------------------------------------------------------------------------
+# TRANSITIONAL -- raw -> GeoTIFF migration only.
+#
+# Set this False and cleanLegacyRaw() becomes a no-op for every caller, which
+# is the single edit needed to retire the step once no frame directory on disk
+# still carries pre-tiff raw products. At that point delete cleanLegacyRaw(),
+# legacyRawTable(), rawBackedVrts(), rawIsRedundant() and the call site in
+# dofast.py; nothing else in the pipeline depends on them.
+# ---------------------------------------------------------------------------
+CLEAN_LEGACY_RAW = True
 
 
 def rawDtype(name):
@@ -229,6 +241,8 @@ class Report:
         self.vrts = []
         self.scripts = []
         self.skipped = []
+        self.cleaned = []
+        self.cleanedVrts = []
         self.failed = False
         self.traceback = None
 
@@ -244,6 +258,14 @@ class Report:
                  f'vrts, {len(self.scripts)} scripts']
         lines += [f'    script: {name}' for name in self.scripts]
         lines += [f'    skipped {name}: {why}' for name, why in self.skipped]
+        if self.cleaned or self.cleanedVrts:
+            freed = sum(os.path.getsize(p) for p in self.cleaned
+                        if os.path.exists(p))
+            lines.append(f'  cleaned {len(self.cleaned)} legacy raw + '
+                         f'{len(self.cleanedVrts)} orphaned vrt '
+                         f'({freed / 1e6:.1f} MB still on disk = dry run)')
+            lines += [f'    rm {os.path.relpath(p, self.dirPath)}'
+                      for p in self.cleaned + self.cleanedVrts]
         lines += [f'    left raw: {name}' for name in leftoverRaw(self.dirPath)]
         return '\n'.join(lines)
 
@@ -609,6 +631,170 @@ def dispose(paths, dirPath, debugDir, dryRun=False):
 
 
 # ----------------------------------------------------------------------------
+# legacy raw cleanup  (TRANSITIONAL -- see CLEAN_LEGACY_RAW)
+# ----------------------------------------------------------------------------
+# Offset component -> band role, the naming strack/cullst use for their tiffs
+# (deriveTif in writeCullData.c). Same table as makeCullFile._ROLE plus the
+# two strack-only bands.
+CLEAN_ROLES = {'.dr': 'RangeOffsets', '.da': 'AzimuthOffsets',
+               '.cc': 'Correlation', '.mt': 'MatchType',
+               '.sr': 'RangeSigma', '.sa': 'AzimuthSigma'}
+
+# Never a deletion candidate, whatever a manifest says. The manifests already
+# exclude these; the check makes the invariant explicit so a future table edit
+# cannot quietly widen the blast radius. Dated logs are covered by 'log.*'.
+CLEAN_KEEP_PATTERNS = (
+    'log.*', 'fail.*', 'run*', 'cleanoff', 'dofast', 'regenimage',
+    'strackin*', 'strackRegister*', 'Exclude*', 'Special', 'betaNought',
+    '*.dat', '*.vrt', '*.tif', '*.par', '*.cw', '*.in', '*.geojson',
+    '*.slc', '*.pow', '*.int', '*.reflat', '*.list', '*.idl', '*.poly',
+    '*.simdat', '*.pairinfo', '*.base', '*.params', '*.params.reg',
+    '*.off', '*.offs', '*.snr', '*.coffs', '*.coffsets', '*.azd',
+    '*.thetac', '*.report', '*.SECorrection')
+
+
+def cleanKeep(path):
+    """True for a name that must never be deleted by the cleanup."""
+    name = os.path.basename(path)
+    return any(fnmatch.fnmatch(name, pattern)
+               for pattern in CLEAN_KEEP_PATTERNS)
+
+
+def legacyRawTable(dirPath, pair, extraRoots=()):
+    """{rawPath: tifPath} for every raw product a native tiff run would not
+    write, so the tiff is the only surviving copy.
+
+    Built from the same manifests the converter uses (vrtTable/FAST_TABLE) plus
+    discovery from the sidecars that ARE still written in tiff mode -- the
+    .simdat siminsar leaves and the .dat strack leaves -- so the fast tracker's
+    scale number (.19., .23., ...) is never hardcoded. extraRoots lets a caller
+    name roots it already knows, as a belt-and-braces against a missing sidecar.
+    """
+    products = []
+    for _, bands in vrtTable(pair):
+        products += [(dirPath, name, role) for name, role in bands]
+    fastDir = os.path.join(dirPath, 'fast')
+    if os.path.isdir(fastDir):
+        for _, bands in FAST_TABLE:
+            products += [(fastDir, name, role) for name, role in bands]
+    # Simulated offsets/geometry: siminsar writes <root>.simdat in both modes.
+    for simdat in glob.glob(os.path.join(dirPath, '*.simdat')):
+        root = os.path.basename(simdat)[:-len('.simdat')]
+        for suffix in ('.da', '.dr', '.lat', '.lon', '.mask'):
+            products.append((dirPath, f'{root}{suffix}',
+                             CLEAN_ROLES.get(suffix, '')))
+    # Fast-tracker intermediates, from the .dat sidecars and .merge vrts.
+    roots = {os.path.basename(p)[:-len('.dat')]
+             for p in glob.glob(os.path.join(fastDir, '*.dat'))}
+    roots |= {os.path.basename(p)[:-len('.vrt')]
+              for p in glob.glob(os.path.join(fastDir, '*.merge.vrt'))}
+    roots |= set(extraRoots)
+    for root in sorted(roots):
+        for base in (root, f'{root}.cull'):
+            for suffix, role in CLEAN_ROLES.items():
+                products.append((fastDir, f'{base}{suffix}', role))
+        products.append((fastDir, f'{root}.mask', ''))
+    products.append((fastDir, 'initialGuess.fastmask.mask', ''))
+
+    table = {}
+    for parent, name, role in products:
+        raw = os.path.join(parent, name)
+        table[raw] = os.path.join(parent, tifName(name, role, pair))
+    return table
+
+
+def rawIsRedundant(rawPath, tifPath):
+    """True when rawPath is a pre-tiff leftover fully represented by tifPath.
+
+    Every gate must pass, because the cost of a false positive is silent data
+    loss: a real file that is not a symlink, a non-empty tiff that GDAL can
+    actually open, a tiff at least as new as the raw, and a grid whose pixel
+    count times the raw's element size is exactly the raw's byte count. A
+    zero-byte raw carries nothing and needs no grid match."""
+    if cleanKeep(rawPath):
+        return False
+    if not os.path.isfile(rawPath) or os.path.islink(rawPath):
+        return False
+    if not os.path.isfile(tifPath) or os.path.getsize(tifPath) == 0:
+        return False
+    if os.path.getmtime(tifPath) < os.path.getmtime(rawPath):
+        return False
+    dataSet = gdal.Open(tifPath)
+    if dataSet is None:
+        return False
+    rawSize = os.path.getsize(rawPath)
+    if rawSize == 0:
+        return True
+    expected = (dataSet.RasterXSize * dataSet.RasterYSize *
+                np.dtype(rawDtype(rawPath)).itemsize)
+    return rawSize == expected
+
+
+def rawBackedVrts(dirPath, debugDir=None):
+    """[(vrtPath, [sourcePath, ...])] for every VRT in the frame dir or one
+    level below that still has VRTRawRasterBand sources. A mixed-vintage
+    directory is the normal case, so a .tif sitting next to a .vrt proves
+    nothing about which one the VRT points at."""
+    found = []
+    for vrtPath in sorted(glob.glob(os.path.join(dirPath, '*.vrt')) +
+                          glob.glob(os.path.join(dirPath, '*', '*.vrt'))):
+        if isSkippedSubdir(os.path.dirname(vrtPath), debugDir):
+            continue
+        try:
+            bands = vrtRawBands(vrtPath)
+        except ET.ParseError:
+            continue
+        if bands:
+            found.append((vrtPath, [source for _, source, _ in bands]))
+    return found
+
+
+def cleanLegacyRaw(dirPath, extraRoots=(), debugDir=None, dryRun=False,
+                   report=None):
+    """Remove the pre-tiff raw products, and any VRT left pointing only at
+    them, so a converted frame directory looks like one processed natively in
+    tiff mode. Returns (removedRaw, removedVrt).
+
+    Safe to run concurrently on sibling frames: it touches only dirPath and
+    never chdirs (unlike regenerateInPlace), so no CHDIR_LOCK is needed."""
+    if not CLEAN_LEGACY_RAW:
+        return [], []
+    pair = pairPrefix(dirPath)
+    candidates = legacyRawTable(dirPath, pair, extraRoots)
+    deleteRaw = {raw for raw, tif in candidates.items()
+                 if rawIsRedundant(raw, tif)}
+
+    # A VRT that still needs ANY of its raw bands keeps all of them, and is
+    # itself kept. Iterate to a fixpoint: releasing one VRT's bands can be what
+    # makes another VRT's last live band disappear. Without this, offsets.vrt,
+    # offsets.SECorrection.vrt and fast/initialGuess.vrt get classed as orphans
+    # while their raws are correctly held -- deleting readable products.
+    vrts = rawBackedVrts(dirPath, debugDir)
+    changed = True
+    while changed:
+        changed = False
+        for _, sources in vrts:
+            live = [s for s in sources
+                    if os.path.exists(s) and s not in deleteRaw]
+            if live:
+                protected = deleteRaw & set(sources)
+                if protected:
+                    deleteRaw -= protected
+                    changed = True
+
+    removedVrt = [vrt for vrt, sources in vrts
+                  if sources and all(s in deleteRaw or not os.path.exists(s)
+                                     for s in sources)]
+    removedRaw = sorted(deleteRaw)
+    dispose(removedRaw, dirPath, debugDir, dryRun=dryRun)
+    dispose(removedVrt, dirPath, debugDir, dryRun=dryRun)
+    if report is not None:
+        report.cleaned = removedRaw
+        report.cleanedVrts = removedVrt
+    return removedRaw, removedVrt
+
+
+# ----------------------------------------------------------------------------
 # post-processing scripts
 # ----------------------------------------------------------------------------
 def frameSensor(dirPath):
@@ -766,6 +952,21 @@ def regenerateInPlace(dirPath, jobs, cleanoffPath, pair, sensorInfo,
             report.skip('cleanoff', f'could not regenerate ({error})')
         finally:
             os.chdir(cwd)
+
+
+def cleanOne(dirPath, debugName=None, dryRun=False):
+    """Run only the legacy-raw cleanup on one frame directory, no conversion.
+    Returns its Report; never raises, for the same reason convertOne doesn't."""
+    report = Report(dirPath)
+    report.vintage = 'clean'
+    try:
+        cleanLegacyRaw(dirPath, debugDir=frameDebugDir(dirPath, debugName),
+                       dryRun=dryRun, report=report)
+    except BaseException as error:
+        report.failed = True
+        report.skip('directory', f'FAILED: {error}')
+        report.traceback = traceback.format_exc()
+    return report
 
 
 def convertOne(dirPath, debugName=None, dryRun=False):
@@ -931,6 +1132,11 @@ def main():
                         help='Skip frames acquired after this date [all time]')
     parser.add_argument('--dryRun', action='store_true',
                         help='Report what would be done and touch nothing')
+    parser.add_argument('--cleanOnly', action='store_true',
+                        help='Do not convert: only remove pre-tiff raw '
+                        'products that already have a verified GeoTIFF '
+                        'counterpart, plus any vrt left pointing solely at '
+                        'them. Same step dofast runs at the end of a frame')
     args = parser.parse_args()
     if args.tracks and args.allTracks:
         u.myerror('use --tracks or --allTracks, not both')
@@ -974,9 +1180,10 @@ def main():
         print(f'{len(dirs)} frame directories, {args.nThreads} at a time'
               f'{"  (dryRun)" if args.dryRun else ""}')
     threads = max(1, min(args.nThreads, len(dirs)))
+    runOne = cleanOne if args.cleanOnly else convertOne
     with ThreadPoolExecutor(max_workers=threads) as executor:
         reports = list(executor.map(
-            lambda d: convertOne(d, debugName=debugName, dryRun=args.dryRun),
+            lambda d: runOne(d, debugName=debugName, dryRun=args.dryRun),
             dirs))
 
     for report in reports:

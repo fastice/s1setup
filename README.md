@@ -45,6 +45,7 @@ pip install git+https://github.com/fastice/s1setup.git@main
 - [radcalcoeffs](Documents/radcalcoeffs.md) — compute beta nought calibration coefficient from SAFE calibration XML
 - [runPreProcTops](Documents/runPreProcTops.md) — unpack TOPS SAFE directories into per-beam SLC files (requires Gamma)
 - [setupSeveralTopsImages](Documents/setupSeveralTopsImages.md) — create setup scripts for each orbit/frame combination (requires Gamma)
+- [setuppairs](Documents/setuppairs.md) — set up every unprocessed pair in a track for a year (any separation up to the sensor maxDays)
 - [setupStrackReg](Documents/setupStrackReg.md) — run speckle-tracking registration and offset pipeline for an image pair
 - [setupTrack](Documents/setupTrack.md) — orchestrate the 5-step Sentinel-1 preprocessing pipeline
 - [trimTopsSLCsToFit](Documents/trimTopsSLCsToFit.md) — trim TOPS SLC frames to fit the track frame range (requires Gamma)

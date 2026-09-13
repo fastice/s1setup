@@ -125,6 +125,9 @@ For each orbit directory in the given track:
    - `runPreProcTops` — preprocessing
    - `trimTopsSLCsToFit` — trim bursts to frame bounds (Gamma)
    - `catMultipleTops` — concatenate multi-sequence SLCs (Gamma)
+     (single-SAFE units skip this: SLCs are renamed into the output dir and `setupTrack`
+     itself writes `SLC_tab_YYYYMMDD-<seq>` and copies `absolutegain`/`ascendingNodeTime`,
+     which the `setup_<orbit>_<burst>` scripts need)
    - `radcalcoeffs` — radiometric calibration coefficients
 4. Intermediate SLCs are written to scratch; the scratch directory is cleaned up after each orbit
 

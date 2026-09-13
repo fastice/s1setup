@@ -40,7 +40,9 @@ prints to the terminal as before.  The write modes are:
                     link here yet, so their acquisitions become visible
     -commit         write the entries just proposed into orbitframes, then
                     build the setup scripts for them
-    -undo           put back the orbitframes from before the last -commit
+    -undo           put back the orbitframes from before the last -commit,
+                    saying how far back that is and asking first
+    -undoNoPrompt   the same, without the question
     -undoLinks      remove the links made by the last -refreshLinks
 
 so the routine update is `-refreshLinks`, read the proposal, then `-commit`.
@@ -54,11 +56,24 @@ proposed -- merged into orbitframes in memory, so it is checked whether or not
 it is being committed.  That pass writes nothing and collects every failure
 rather than stopping at the first, which is what setupSeveralTopsImages does on
 its own.  If it reports anything, nothing is written at all: not orbitframes,
-not the setup scripts.  The framing needs fixing first.  A clean pass under
+not the setup scripts.  The framing needs fixing first, and each failure is
+said to be either the proposal's or something the run cannot rewrite.  That
+pass covers its own window of the record, so the derivation reaches back over
+any acquisition in it that has never been framed, however far past -lookBack
+that is: an acquisition nothing has proposed for is checked against the default
+`frames` entries, which its coverage usually cannot carry, and one of those
+would block the commit.  A clean pass under
 -commit writes the entries and then the setup_<orbit>_<firstBurst> scripts and
 their runSetup driver, clearing out the scripts of pieces never built and the
 run files of earlier runs on the way, so running twice leaves one current set.
 -noSetup stops after orbitframes and writes no scripts.
+
+A burst missing from an assembled SLC is reported, drawn against the frames
+being cut and put to the user rather than ending the run: the numbering steps
+over the hole, the burst positions are read back out of the burst times, and a
+frame either side of it is cut exactly as it always was.  Only a frame cut over
+the hole is refused.  -acceptGaps answers yes in advance; a run with no
+terminal to ask on stops.
 
 Run from the track directory (the one holding `frames`, `orbitframes` and the
 <orbit>-<seq>directories).
@@ -111,7 +126,9 @@ DEFAULTMAXBURSTS = 76
 # that was built.  A track carries a decade of acquisitions and the old ones
 # were framed against SLCs that have been re-downloaded since, so checking them
 # reports problems that are neither new nor worth fixing.  -firstdate overrides
-# it, which is how an older stretch is deliberately taken in.
+# it, which is how an older stretch is deliberately taken in.  It also sets how
+# far back the proposal has to reach (frameFrom): whatever is checked must have
+# been framed, or the check reads the `frames` defaults for it.
 #
 SETUPWINDOWDAYS = 90
 #
@@ -137,6 +154,54 @@ def newestBackup(pattern):
     if not found:
         return None
     return found[-1]
+
+
+def backupTime(backup):
+    '''
+    When a backup was made, from the stamp in its name.
+
+    Falls back to the file's own mtime for a name that does not parse, so a
+    backup renamed or copied by hand can still be dated.
+    '''
+    try:
+        return datetime.strptime(backup.split('.')[-1], '%Y%m%dT%H%M%S')
+    except ValueError:
+        return datetime.fromtimestamp(os.path.getmtime(backup))
+
+
+def describeAge(when):
+    '''
+    How long ago `when` was, in the two largest units that apply.
+
+    Read before an undo is agreed to, so it says which commit is coming back:
+    one from a few minutes ago is this session's, one from last week is
+    somebody else's work being thrown away.
+    '''
+    delta = datetime.now() - when
+    if delta < timedelta(0):
+        return 'in the future'
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return 'less than a minute ago'
+    units = [('day', minutes // 1440), ('hour', minutes % 1440 // 60),
+             ('minute', minutes % 60)]
+    parts = [f'{count} {name}{"" if count == 1 else "s"}'
+             for name, count in units if count]
+    return ' '.join(parts[:2]) + ' ago'
+
+
+def confirm(question):
+    '''
+    Ask before an irreversible step; anything but y/yes leaves it undone.
+
+    A run with no terminal to ask on (a script, a pipe) gets no as its answer
+    rather than an exception -- -undoNoPrompt is how that run means yes.
+    '''
+    try:
+        answer = input(f'{question} [y/N] ')
+    except EOFError:
+        return False
+    return answer.strip().lower() in ('y', 'yes')
 
 
 def atomicWrite(path, lines):
@@ -330,16 +395,17 @@ def getAcquisitions(firstDate, lastDate):
         #
         if not stale:
             byOrbit[orbit]['noData'] = False
-        byOrbit[orbit]['dirs'].append((slcDir, [] if gappy else
-                                       [tuple(x) for x in runs]))
+        byOrbit[orbit]['dirs'].append((slcDir, [tuple(x) for x in runs]))
         if gappy:
             #
-            # No framing can be built from this directory -- checkBurstTimes
-            # aborts on it first -- so contribute no coverage and report it
+            # A burst went missing during assembly.  The numbering steps over
+            # it, which is the record of what is not there, and the runs
+            # either side of it are sound -- a piece is only ever cut from
+            # inside one run (usableRun) -- so the coverage is contributed and
+            # the hole reported for the user to accept
             #
             byOrbit[orbit]['gappy'].append(slcDir)
-        else:
-            byOrbit[orbit]['runs'] += [list(x) for x in runs]
+        byOrbit[orbit]['runs'] += [list(x) for x in runs]
     acquisitions = []
     for acq in byOrbit.values():
         if acq['date'] < firstDate or acq['date'] > lastDate:
@@ -668,6 +734,13 @@ class TrackFraming(object):
         # orbit -> the built acquisition its keys were taken from
         self.reference = {}
         #
+        # orbit -> lines a built acquisition is missing altogether, so that
+        # the default `frames` entries stop being read for it.  The one thing
+        # written for an acquisition already built besides a mate piece, and
+        # only where it has no lines of its own (repairLines)
+        #
+        self.repair = {}
+        #
         # Orbits whose SLCs have been cleaned away.  A framing is still
         # derived for them, since that is what the comparison is read
         # against, but there is nothing left to cut so none of it is written
@@ -991,6 +1064,43 @@ def framePieces(runs, reference, allowed, args, boxes=(), ground=None,
             if last - first + 1 >= args.minBursts]
 
 
+def repairLines(acq, built, frames, orbframes):
+    '''
+    The orbitframes lines a built acquisition is missing, or [].
+
+    `frames` is only the default, and a track's default is edited over the
+    years -- widened as the coverage grows, moved when the datatake does.  An
+    acquisition built under an older one and never given lines of its own is
+    then read against a default it does not fit, and the setup step stops on
+    it: on track-133 every acquisition is cut 400-12 and 180 of them say so,
+    but the six that do not are checked against `frames` 402-62, which their
+    22 bursts cannot carry.
+
+    Writing the lines is the whole point of the file, so they are written --
+    from what was actually built, which is the plan that produced the
+    directories on disk.  Only an acquisition with no lines at all is given
+    any: one that has them was framed deliberately, and a default it cannot
+    cover is then a genuine thing to fix by hand rather than to guess at.
+    '''
+    orbit = acq['orbit']
+    if not built.get(orbit) or acq.get('noData'):
+        return []
+    if any(entry[0] == orbit for entry in orbframes):
+        return []
+    #
+    # Only where the default really cannot be cut.  A built acquisition the
+    # default fits needs no line: it is already described by `frames`
+    #
+    if not any(nBursts > 0 and
+               usableRun(acq['runs'], first, first + nBursts - 1) is None
+               for first, nBursts in frames):
+        return []
+    framing = builtFraming(acq, built, frames, orbframes)
+    if not framing:
+        return []
+    return orbitLines(sorted(framing.items()), len(frames))
+
+
 def frameTrack(acquisitions, frames, orbframes, built, allowed, args,
                fromAcq=0, boxes=()):
     '''
@@ -1026,6 +1136,8 @@ def frameTrack(acquisitions, frames, orbframes, built, allowed, args,
                           framePieces(acq['runs'], reference, allowed, args,
                                       boxes, ground, established))
         framing.reference[acq['orbit']] = match
+        framing.repair[acq['orbit']] = repairLines(acq, built, frames,
+                                                   orbframes)
     addMates(framing, acquisitions, built, args)
     return framing
 
@@ -1160,7 +1272,8 @@ def proposedEntries(framing, built, orbframes, nDefault, onlyOrbits=None):
 
     An acquisition already built gets only the pieces it is being given,
     indexed above everything it already carries so that determineFraming adds
-    them to its framing rather than replacing part of it.  One not yet built
+    them to its framing rather than replacing part of it, and the lines it is
+    missing altogether where it has none (repairLines).  One not yet built
     gets its whole framing, which -commit writes in place of anything it has.
     '''
     entries = {}
@@ -1170,10 +1283,17 @@ def proposedEntries(framing, built, orbframes, nDefault, onlyOrbits=None):
         if orbit in framing.noData:
             continue
         if built.get(orbit):
+            #
+            # The repair lines take the default indices, which this orbit has
+            # none of, and a mate piece is indexed above them as always
+            #
+            lines = list(framing.repair.get(orbit, []))
             if framing.appended.get(orbit):
-                entries[orbit] = orbitLines(
+                lines += orbitLines(
                     framing.appended[orbit], nDefault,
                     fromIndex=highestIndex(orbit, orbframes, nDefault))
+            if lines:
+                entries[orbit] = lines
             continue
         if framing.pieces.get(orbit):
             entries[orbit] = orbitLines(framing.pieces[orbit], nDefault)
@@ -1321,6 +1441,50 @@ def describeError(error):
     return f'    {where}: {message}' if where else f'    {message}'
 
 
+def whyBlocked(error, orbits, built):
+    '''
+    What kind of failure this is, and so where the fix belongs.
+
+    The setup step covers more of the record than any one run proposes for, so
+    a failure is not necessarily in the framing just derived: it can be an
+    acquisition already built, whose lines are never rewritten here, or one
+    with no burst times to frame from at all.  Nothing is written either way --
+    a run that cannot set up what it checked is not one to commit -- but which
+    file to reach for is not the same in the three cases.
+    '''
+    kind = getattr(error, 'kind', None)
+    if kind == 'gap':
+        return ('        a frame is cut over a burst that is missing, which '
+                'is the one thing a hole does stop -- reframe it to sit '
+                'either side of the hole, or re-assemble the acquisition')
+    if kind == 'btimes':
+        return ('        it has no burst times to frame from -- the '
+                'directory needs repairing, not the framing')
+    if kind in ('ascnode', 'ascdesc'):
+        return ('        it cannot be dated or its pass direction cannot be '
+                'read, so nothing can be framed from it -- the directory '
+                'needs repairing, not the framing')
+    if error.orbit in orbits:
+        return ('        this is the framing proposed here -- fix `frames` or '
+                '`orbitframes` and run again')
+    if error.orbit is not None and built.get(error.orbit):
+        #
+        # Nothing was built for this frame -- one that was is not range
+        # checked at all -- so it is a frame the acquisition never covered and
+        # nothing says so.  Where a whole run of built orbits reports the same
+        # frame, it is the `frames` entry that has gone stale, not each of them
+        #
+        frame = ('' if error.frameRange is None else
+                 f' {error.frameRange[0]}-{error.frameRange[1]}')
+        return ('        already built, so segmentTrack never rewrites its '
+                f'lines -- either the `frames` entry{frame} no longer fits '
+                'this track, or this orbit needs a line of its own zeroing it '
+                f'(<orbit>-<index>-{error.frameRange[0]}-0)')
+    return ('        nothing is proposed for it, so it is checked against '
+            '`frames` as it stands -- give it orbitframes lines by hand, or '
+            'reach it with -firstdate/-lookBack')
+
+
 def summarizeSetup(result, verb):
     '''Counts from one setupSeveralTopsImages pass'''
     made = len(result['setupFiles'])
@@ -1329,6 +1493,25 @@ def summarizeSetup(result, verb):
           f'{skipped} already built')
     if result['runfile'] is not None:
         print(f'    scripts listed in {result["runfile"]}')
+    outOfRange = result.get('outOfRange')
+    if outOfRange:
+        #
+        # The SLCs behind these were re-downloaded after the piece was cut and
+        # came back covering less ground.  Nothing is wrong with the piece --
+        # it exists and pairs -- but it could not be cut again from what is
+        # there now, which is worth knowing before anything is deleted
+        #
+        shown = ' '.join(f'{outDir}({first}-{last})'
+                         for outDir, first, last in outOfRange[:6])
+        more = ('' if len(outOfRange) <= 6 else
+                f' ... and {len(outOfRange) - 6} more')
+        one = len(outOfRange) == 1
+        print(f'    {len(outOfRange)} piece{"" if one else "s"} already built '
+              f'{"is" if one else "are"} no longer covered by the SLCs now on '
+              'disk, which have been re-downloaded since; left as '
+              f'{"it is" if one else "they are"}, but '
+              f'{"it" if one else "they"} could not be cut again: '
+              f'{shown}{more}')
     noAscNode = result.get('noAscNode')
     if noAscNode:
         #
@@ -1396,6 +1579,201 @@ def setupWindow(args, built, acquisitions):
     return max(dates) - timedelta(days=SETUPWINDOWDAYS), args.lastDate
 
 
+def frameFrom(acquisitions, built, args, windowFirst, frames, orbframes):
+    '''
+    Where the derivation has to start, as an index into acquisitions.
+
+    -lookBack says how many recent acquisitions to re-derive, but the setup
+    step checks every acquisition in its own window, which reaches back
+    further.  One of those that has never been framed is checked against an
+    orbitframes that says nothing about it, and determineFraming then hands it
+    every default `frames` entry -- entries its coverage usually cannot carry,
+    since a track that has been reframed is normally one whose datatakes have
+    moved.  So an acquisition nobody has looked at blocks the whole commit,
+    and the way out is to frame it rather than to step over it.
+
+    An acquisition already built is reached back to only where it has no
+    lines the check can read -- `frames` is a default, and one it does not fit
+    leaves the acquisition described by nothing (repairLines).  A built one
+    the default does fit is left where it is, so the window widens only when
+    there is something to write.
+
+    Taking these in changes nothing about the acquisitions -lookBack already
+    covered: referenceFraming carries a framing forward only from
+    acquisitions that have been built, and those were candidates before this
+    reached back to them.
+    '''
+    fromAcq = max(0, len(acquisitions) - args.lookBack)
+    unframed = [iAcq for iAcq in range(fromAcq)
+                if acquisitions[iAcq]['date'] >= windowFirst and
+                not acquisitions[iAcq].get('noData') and
+                (not built.get(acquisitions[iAcq]['orbit']) or
+                 repairLines(acquisitions[iAcq], built, frames, orbframes))]
+    return min(unframed) if unframed else fromAcq
+
+
+def gapReport(slcDir, acquisitions, frames, orbframes):
+    '''
+    What a directory with a missing burst means for the pieces cut from it.
+
+    Returns (runs, holes, framing, spanning): the sound stretches either side
+    of the hole, the bursts that are not there, what this orbit is framed as,
+    and the frames that run over a hole.  A frame clear of the hole is cut as
+    it always was -- makeSetupFile takes the burst positions from the burst
+    times, so a piece never slides past a hole it does not cross -- and a frame
+    running over one cannot be cut at all.
+    '''
+    runs, _ = burstRuns(slcDir)
+    holes = [burst for first, last in zip(runs, runs[1:])
+             for burst in range(first[1] + 1, last[0])]
+    orbit = int(slcDir.split('-')[0])
+    framing = [frameRange for frameRange in
+               determineFraming(orbit, 0, frames, orbframes)
+               if frameRange[1] > 0]
+    spanning = [frameRange for frameRange in framing
+                if any(frameRange[0] <= hole <=
+                       frameRange[0] + frameRange[1] - 1 for hole in holes)]
+    return runs, holes, framing, spanning
+
+
+def plotBurstGaps(reports):
+    '''
+    Draw the hole against the frames being cut, so the warning can be seen.
+
+    One row per directory: the bursts it holds, the ones that are missing, and
+    under them the frames this track cuts -- which is the whole question, since
+    a frame either runs over the hole or it does not.  Drawn before the prompt
+    and closed after it; a run with no display says so and carries on with the
+    text.
+    '''
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as exception:
+        print(f'    (no plot: {exception})')
+        return None
+    figure, axes = plt.subplots(figsize=(9, 1.8 + 0.9 * len(reports)))
+    seen = set()
+
+    def once(label):
+        '''One legend entry per kind, however many rows draw it'''
+        if label in seen:
+            return None
+        seen.add(label)
+        return label
+
+    for row, (slcDir, runs, holes, framing, spanning) in enumerate(reports):
+        base = -row
+        for first, last in runs:
+            axes.plot([first, last], [base, base], linewidth=8,
+                      solid_capstyle='butt', color='#9ecae1',
+                      label=once('bursts held'))
+        for hole in holes:
+            axes.plot([hole, hole], [base - 0.42, base + 0.18],
+                      linewidth=1.2, linestyle='--', color='#D55E00',
+                      zorder=3)
+            axes.plot([hole], [base], marker='x', markersize=10,
+                      markeredgewidth=2.2, color='#D55E00', zorder=4,
+                      label=once('missing'))
+        for frameRange in framing:
+            over = frameRange in spanning
+            axes.plot([frameRange[0], frameRange[0] + frameRange[1] - 1],
+                      [base - 0.3, base - 0.3], linewidth=6,
+                      solid_capstyle='butt',
+                      color='#D55E00' if over else '#31a354',
+                      label=once('frame cut over the hole' if over
+                                 else 'frame cut'))
+    axes.set_yticks([-row for row in range(len(reports))])
+    axes.set_yticklabels([report[0] for report in reports], fontsize=9)
+    axes.set_ylim(-len(reports) + 0.4, 0.85)
+    axes.set_xlabel('burst')
+    axes.set_title('missing bursts against the frames being cut', fontsize=10)
+    axes.legend(loc='upper center', frameon=False, fontsize=8, ncol=4,
+                bbox_to_anchor=(0.5, 1.0))
+    axes.grid(axis='x', color='#dddddd', linewidth=0.6)
+    axes.set_axisbelow(True)
+    for side in ('top', 'right', 'left'):
+        axes.spines[side].set_visible(False)
+    figure.tight_layout()
+    try:
+        plt.show(block=False)
+        plt.pause(0.1)
+    except Exception as exception:
+        print(f'    (no plot shown: {exception})')
+    return figure
+
+
+def acceptBurstGaps(gappy, acquisitions, frames, orbframes, args):
+    '''
+    Report the directories a burst is missing from, and ask to go on.
+
+    A missing burst used to stop the track outright.  It only matters where a
+    frame is cut over it: the numbering steps over the hole and the burst
+    positions are read back out of the burst times, so a piece either side of
+    it is cut exactly as it always was.  That is a rare enough thing to be
+    worth seeing rather than passing over, hence the report, the plot and the
+    question -- and a run with no terminal to ask on stops, so nothing is
+    built on the back of it unnoticed (-acceptGaps says yes in advance).
+    '''
+    reports, blocked = [], []
+    for slcDir in gappy:
+        runs, holes, framing, spanning = gapReport(slcDir, acquisitions,
+                                                   frames, orbframes)
+        reports.append((slcDir, runs, holes, framing, spanning))
+        shown = ' '.join(str(hole) for hole in holes[:8])
+        one = len(holes) == 1
+        print(f'\n{BOLD}*** {slcDir}: burst{"" if one else "s"} {shown} '
+              f'{"is" if one else "are"} missing from the assembled SLC'
+              f'{PLAIN}')
+        print('    the numbering steps over the hole, which is the record of '
+              'what is not there; it is the frames cut over it that cannot be '
+              'built')
+        for frameRange in framing:
+            first, last = frameRange[0], frameRange[0] + frameRange[1] - 1
+            if frameRange in spanning:
+                blocked.append(slcDir)
+                print(f'    {ERROR}frame {first}-{last} runs over it and '
+                      f'cannot be cut{PLAIN}')
+            else:
+                print(f'    frame {first}-{last} is clear of it and is cut as '
+                      'it always was')
+    figure = plotBurstGaps(reports)
+    if args.acceptGaps:
+        print('\n-acceptGaps: going on')
+        answer = True
+    else:
+        answer = confirm('\ngo on with these acquisitions?')
+    if figure is not None:
+        try:
+            import matplotlib.pyplot as plt
+            plt.close(figure)
+        except Exception:
+            pass
+    return answer
+
+
+def plotFrom(acquisitions, built, start, nBuilt):
+    '''
+    Where the plot starts: `start`, backed up over nBuilt built acquisitions.
+
+    The pieces already built are what the proposal is read against -- the
+    ticks lining up down the plot is what a well framed track looks like --
+    and the stretch being proposed for is by definition the stretch nothing
+    has been built from, so on a track with a backlog it holds none of them.
+    Backing up over as many built acquisitions as referenceFraming counts as
+    neighbours puts the framing being carried forward on the screen.  They are
+    only context: an acquisition already built is drawn faded and is never
+    written, whatever the plot shows.
+    '''
+    found = start
+    for iAcq in range(start - 1, -1, -1):
+        if built.get(acquisitions[iAcq]['orbit']):
+            found = iAcq
+            nBuilt -= 1
+            if nBuilt <= 0:
+                break
+    return found
+
+
 def repairSlippedBursts(slcDirs):
     '''
     Renumber the burst times of the directories whose sequence is broken.
@@ -1438,8 +1816,8 @@ def repairSlippedBursts(slcDirs):
             print(f'    swaths disagree: {warning.strip()}')
     for slcDir in holes:
         print(f'    {slcDir}: recomputing gives the same numbering, so the '
-              'bursts really are missing -- not a numbering slip, and nothing '
-              'can be built from it')
+              'bursts really are missing -- not a numbering slip; only the '
+              'frames cut over the hole are stopped by it')
     for slcDir in keyed:
         print(f'{BOLD}    {slcDir}: recomputing moves the first burst number, '
               f'which is the piece key, so it has been left alone -- run '
@@ -1451,7 +1829,7 @@ def repairSlippedBursts(slcDirs):
 
 
 def setupStep(args, proposal, orbits, orbframes, origFrames, acquisitions,
-              built):
+              built, window):
     '''
     Run setupSeveralTopsImages over the framing just proposed.
 
@@ -1460,7 +1838,7 @@ def setupStep(args, proposal, orbits, orbframes, origFrames, acquisitions,
     hidden.  Nothing is written while anything is wrong -- not orbitframes, not
     the scripts -- since a framing the setup step cannot realize is not one to
     commit.  What to do about a failure is left to the user for now: the run
-    reports it and stops.
+    reports it, says which kind it is (whyBlocked), and stops.
 
     Returns (ok, write): ok is False if the check failed, and write is the call
     that commits and builds the scripts, or None where there is nothing left to
@@ -1470,7 +1848,7 @@ def setupStep(args, proposal, orbits, orbframes, origFrames, acquisitions,
     '''
     merged = mergedOrbframes(proposal, orbits, orbframes, built,
                              len(origFrames))
-    firstDate, lastDate = setupWindow(args, built, acquisitions)
+    firstDate, lastDate = window
     since = ('' if args.firstdate is not None else
              f' (acquisitions since {firstDate:%Y-%m-%d}, '
              f'-firstdate reaches further back)')
@@ -1487,6 +1865,7 @@ def setupStep(args, proposal, orbits, orbframes, origFrames, acquisitions,
               f'problem{"" if count == 1 else "s"} with this framing:{PLAIN}')
         for error in dry['errors']:
             print(describeError(error))
+            print(whyBlocked(error, orbits, built))
         print(f'\n{ERROR}nothing written -- neither orbitframes nor any setup '
               f'script.{PLAIN} Fix `frames` or `orbitframes` and run again.')
         return False, None
@@ -1518,11 +1897,24 @@ def setupStep(args, proposal, orbits, orbframes, origFrames, acquisitions,
     return True, write
 
 
-def undoCommit():
-    '''Restore the newest orbitframes backup, and drop it from the stack'''
+def undoCommit(prompt=True):
+    '''
+    Restore the newest orbitframes backup, and drop it from the stack.
+
+    What is being put back is stated before anything is written, since the
+    stack goes back as far as the commits do and the newest backup is only
+    this session's work if this session is what last committed.
+    '''
     backup = newestBackup('orbitframes.bak.*')
     if backup is None:
         print(f'no {BACKUPDIR}/orbitframes.bak.* backup -- nothing to undo')
+        return
+    when = backupTime(backup)
+    print(f'{BOLD}-undo puts back the orbitframes as it stood at '
+          f'{when:%Y-%m-%d %H:%M:%S}, {describeAge(when)}{PLAIN}')
+    print(f'    everything committed since then is discarded ({backup})')
+    if prompt and not confirm('    restore it?'):
+        print('    orbitframes left as it is')
         return
     atomicCopy(backup, 'orbitframes')
     os.remove(backup)
@@ -1822,17 +2214,25 @@ def plotTrack(acquisitions, built, frames, origFrames, orbframes,
         #
         # Every acquisition is framed, and seeing that against what was built
         # is the point of the plot.  Only the ones not yet built would
-        # actually be written, though, so the rest are drawn faded: an
-        # acquisition already built keeps its own lines, and one whose SLCs
-        # have been cleaned away has nothing left to cut
+        # actually be written, though, and a faded band on its own does not
+        # say which of the two reasons it is, so each is named: an acquisition
+        # already built keeps its own lines, and one whose SLCs have been
+        # cleaned away has nothing left to cut whatever its lines say.  Where
+        # both are true the band above the row already says it was built, so
+        # the one that is not obvious is the one named.
         #
-        stale = built.get(orbit) or acq.get('noData')
+        if acq.get('noData'):
+            label, colour, opacity = ('proposed, SLCs cleaned away',
+                                      '#777777', 0.45)
+        elif built.get(orbit):
+            label, colour, opacity = 'proposed, already built', '#C2185B', 0.35
+        else:
+            label, colour, opacity = 'proposed', '#C2185B', 1.0
         bands = [('built', '#404040', 1, 1.0,
                   [(start, start + lengths[start] - 1)
                    for start in sorted(built.get(orbit, ()))
                    if lengths.get(start)]),
-                 ('proposed, outdated' if stale else 'proposed',
-                  '#C2185B', -1, 0.35 if stale else 1.0,
+                 (label, colour, -1, opacity,
                   [(first, first + nBursts - 1)
                    for first, nBursts in sorted(pieces)])]
         for label, colour, side, opacity, spans in bands:
@@ -2218,14 +2618,17 @@ def processArgs():
     parser = argparse.ArgumentParser(
         epilog='Part of the s1setup package.',
         description='Propose orbitframes entries from burst coverage. Writes '
-                    'nothing unless -commit, -refreshLinks, -undo or '
-                    '-undoLinks is given.',
+                    'nothing unless -commit, -refreshLinks, -undo, '
+                    '-undoNoPrompt or -undoLinks is given.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-lookBack', '--lookBack', type=int, default=12,
                         help='re-derive the last N acquisitions, ignoring '
                              'their existing orbitframes entries, and print '
                              'the comparison; 0 instead proposes for the '
-                             'acquisitions not yet framed')
+                             'acquisitions not yet framed.  An older '
+                             'acquisition the setup step checks and nothing '
+                             'has framed is taken in whatever N says, since '
+                             'it would otherwise block the commit')
     parser.add_argument('-compare', '--compare', action='store_true',
                         help='re-derive the whole record and compare against '
                              'the existing orbitframes')
@@ -2299,9 +2702,18 @@ def processArgs():
                              'still checked with setupSeveralTopsImages, but '
                              'no setup_ scripts and no runSetup driver are '
                              'written')
+    parser.add_argument('-acceptGaps', '--acceptGaps', action='store_true',
+                        help='go on without asking where a burst is missing '
+                             'from an assembled SLC; the frames clear of the '
+                             'hole are cut as they always were, the ones over '
+                             'it still cannot be built')
     parser.add_argument('-undo', '--undo', action='store_true',
                         help='restore the orbitframes from before the last '
-                             '-commit; repeat to step further back')
+                             '-commit, saying how far back that is and asking '
+                             'before writing; repeat to step further back')
+    parser.add_argument('-undoNoPrompt', '--undoNoPrompt', action='store_true',
+                        help='-undo without the confirmation prompt, for a '
+                             'run with nobody at the terminal')
     parser.add_argument('-refreshLinks', '--refreshLinks',
                         action='store_true',
                         help='link the assembled <orbit>-<seq> directories '
@@ -2333,7 +2745,8 @@ def processArgs():
     # The write modes each undo a different thing, so combining them would
     # only be confusing about what came back
     #
-    if args.undo and (args.commit or args.refreshLinks or args.undoLinks):
+    if (args.undo or args.undoNoPrompt) and (args.commit or args.refreshLinks
+                                             or args.undoLinks):
         sys.exit('*** -undo restores orbitframes on its own -- run it alone')
     if args.undoLinks and (args.commit or args.refreshLinks):
         sys.exit('*** -undoLinks removes links on its own -- run it alone')
@@ -2355,8 +2768,8 @@ def main():
     # The undo modes need neither the framing nor the acquisitions, so they
     # run on their own and return
     #
-    if args.undo:
-        undoCommit()
+    if args.undo or args.undoNoPrompt:
+        undoCommit(prompt=not args.undoNoPrompt)
         return
     if args.undoLinks:
         undoLinks()
@@ -2373,6 +2786,15 @@ def main():
     acquisitions, noData = getAcquisitions(args.firstDate, args.lastDate)
     if not acquisitions:
         sys.exit('*** no assembled <orbit>-<seq> directories with SLCs found')
+    built = builtStarts()
+    #
+    # The dates the setup step covers, and so how far back the derivation has
+    # to reach: whatever that step is going to check, this run has to have
+    # framed, or an acquisition nothing has proposed for stops the commit
+    #
+    setupDates = setupWindow(args, built, acquisitions)
+    reached = frameFrom(acquisitions, built, args, setupDates[0], frames,
+                        orbframes)
     #
     # Before anything is derived from the coverage.  A broken burst sequence is
     # usually a numbering slip rather than missing data, and repairing it here
@@ -2380,13 +2802,22 @@ def main():
     # everything below reads the corrected numbering.  -dump is left alone, so
     # it stays a clean replacement orbitframes on stdout.
     #
-    gappy = [d for a in acquisitions for d in a['gappy']
-             if not a.get('noData')]
+    # Only what this run reads, though: a decade of acquisitions lies behind
+    # the window the setup step covers, and a hole in one of those -- or in a
+    # directory whose SLCs have been cleaned away, which nothing can be cut
+    # from anyway -- is neither new nor this run's business.
+    #
+
+    def stillGappy(acqs):
+        return [d for a in acqs for d in a['gappy']
+                if not a.get('noData') and a['date'] >= setupDates[0]]
+
+    gappy = stillGappy(acquisitions)
     if gappy and not args.dump:
         if repairSlippedBursts(gappy):
             acquisitions, noData = getAcquisitions(args.firstDate,
                                                    args.lastDate)
-    gappy = [d for a in acquisitions for d in a['gappy']]
+            gappy = stillGappy(acquisitions)
     if not args.dump:
         print(f'{len(acquisitions)} acquisitions, '
               f'{acquisitions[0]["date"].strftime("%Y-%m-%d")} to '
@@ -2406,19 +2837,15 @@ def main():
                   'nothing is proposed or set up for them')
         if gappy:
             #
-            # Whatever is left after the repair above: the times themselves
-            # have a hole, so the bursts really are missing and nothing can be
-            # cut from them.  checkBurstTimes aborts the whole track on these
-            # no matter what orbitframes says.
+            # Whatever is left after the repair above: the bursts really are
+            # missing.  What that stops is only the frames cut over the hole,
+            # so it is put to the user rather than ending the run outright
             #
-            print(f'\n{ERROR}*** {len(gappy)} director'
-                  f'{"y" if len(gappy) == 1 else "ies"} really '
-                  f'{"is" if len(gappy) == 1 else "are"} missing bursts and '
-                  f'will stop setupSeveralTopsImages:{PLAIN}')
-            for slcDir in gappy:
-                print(f'    {slcDir}')
+            if not acceptBurstGaps(gappy, acquisitions, frames, orbframes,
+                                   args):
+                sys.exit('*** stopped on the missing bursts -- nothing '
+                         'written')
 
-    built = builtStarts()
     origFrames = [list(f) for f in frames]
     #
     # `frames` sets the floor: the allowable range may be wider than it, from
@@ -2584,7 +3011,9 @@ def main():
         The terminal output, whichever mode was asked for.
 
         Returns the proposal and the orbits it covers, which is what -commit
-        writes: whatever was shown is what gets committed.
+        writes: whatever was shown is what gets committed -- including, where
+        the setup check reads further back than -lookBack, the older unframed
+        acquisitions it had to take in.
         '''
         nDefault = len(origFrames)
         if args.dump:
@@ -2609,24 +3038,61 @@ def main():
         if args.lookBack > 0:
             fromAcq = max(0, len(acquisitions) - args.lookBack)
             proposal = frameTrack(acquisitions, origFrames, orbframes, built,
-                                  allowed, args, fromAcq=fromAcq,
+                                  allowed, args, fromAcq=reached,
                                   boxes=boxes)
-            recent = {a['orbit'] for a in acquisitions[fromAcq:]}
+            shownOrbits = {a['orbit'] for a in acquisitions[reached:]}
+            #
+            # Anything reached past -lookBack is an acquisition the setup step
+            # checks and nothing has framed, so it is listed apart: what is
+            # committed is what was shown, and these were not asked for
+            #
+            backlog = committable(proposal,
+                                  {a['orbit'] for a
+                                   in acquisitions[reached:fromAcq]})
+            if backlog:
+                one = len(backlog) == 1
+                print(f'\n{len(backlog)} acquisition{"" if one else "s"} '
+                      f'older than the last {args.lookBack} '
+                      f'{"has" if one else "have"} no lines the setup step '
+                      'can read -- never framed, or built under a `frames` '
+                      'default that no longer fits -- so they are framed here '
+                      f'as well (back to '
+                      f'{acquisitions[reached]["date"]:%Y-%m-%d}):')
+                for line in formatEntries(proposal, acquisitions, built,
+                                          orbframes, nDefault,
+                                          onlyOrbits=backlog):
+                    print(line)
+                #
+                # Some of them have lines already and were simply never built
+                # from.  Those lines are replaced, which is allowed -- nothing
+                # pairs against an acquisition that was never cut -- but it is
+                # not what -lookBack asked for, so it is said out loud
+                #
+                held = sorted(orbit for orbit in backlog
+                              if any(entry[0] == orbit for entry in orbframes))
+                if held:
+                    print(f'    {len(held)} of them already have orbitframes '
+                          'lines, which are replaced by what is derived here; '
+                          'nothing was ever built from them, so no key that '
+                          'pairs can move: ' +
+                          ' '.join(str(orbit) for orbit in held))
             print('\nFraming for the last '
                   f'{len(acquisitions) - fromAcq} acquisitions '
-                  '(only the ones not yet built can be written):')
-            for line in formatEntries(proposal, acquisitions, built,
-                                      orbframes, nDefault, onlyOrbits=recent):
+                  '(only additions are written for the ones already built):')
+            for line in formatEntries(proposal, acquisitions, built, orbframes,
+                                      nDefault,
+                                      onlyOrbits=shownOrbits - backlog):
                 print(line)
             rows = compareStarts(acquisitions, origFrames, orbframes, proposal,
-                                 built, window=fromAcq, origFrames=origFrames)
-            printComparison(rows, f'Last {args.lookBack} acquisitions, '
-                                  'existing vs derived', showOnly=args.quiet)
+                                 built, window=reached, origFrames=origFrames)
+            printComparison(rows, f'Last {len(acquisitions) - reached} '
+                                  'acquisitions, existing vs derived',
+                            showOnly=args.quiet)
             #
             # Only the orbits shown, and of those only the ones that may be
             # written -- an acquisition already built keeps its own lines
             #
-            orbits = committable(proposal, recent)
+            orbits = committable(proposal, shownOrbits)
             describeFraming(proposal, orbits)
             return proposal, orbits
         #
@@ -2676,15 +3142,20 @@ def main():
             commitEntries(proposal, orbits, acquisitions)
     else:
         ok, write = setupStep(args, proposal, orbits, orbframes, origFrames,
-                              acquisitions, built)
+                              acquisitions, built, setupDates)
     if args.plot or args.plotFile:
         #
         # After the report, not instead of it.  -lookBack narrows the plot the
         # same way it narrows the comparison; a decade on one axis is
         # unreadable
         #
-        shown = (acquisitions[-args.lookBack:] if args.lookBack > 0
-                 else acquisitions)
+        #
+        # The stretch the report covered, and enough of what came before it to
+        # show the framing being carried forward
+        #
+        shown = (acquisitions[plotFrom(acquisitions, built, reached,
+                                       args.refBack):]
+                 if args.lookBack > 0 else acquisitions)
         #
         # Seed up to the start of what is shown, so every plotted acquisition
         # carries a proposal to draw

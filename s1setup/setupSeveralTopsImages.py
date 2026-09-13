@@ -164,9 +164,51 @@ def determineFraming(orbit, seq, frames, orbframes):
     return(framing)
 
 
+def burstPositions(orbit, seq):
+    '''
+    Where each burst of an assembled SLC sits in it, as {frame: position}.
+
+    The position is the line number in the iw1 burst times, counting from 1,
+    which is what a burst tab indexes.  Without a burst missing it is just
+    frame - firstFrame + 1, which is what setuptopsimage assumes; where one has
+    gone missing everything past it sits a burst earlier than that arithmetic
+    says, and the piece would be cut one burst late.  Returns ({}, []) where
+    there is no burst times file to read.
+    '''
+    d = f'{orbit}-{seq}'
+    burstTimes = sorted(glob.glob(f'{d}/*iw1*.btimes'))
+    if len(burstTimes) < 1:
+        return {}, []
+    positions = {}
+    for position, line in enumerate(open(burstTimes[0], 'r'), start=1):
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        positions[int(fields[2])] = position
+    frames = sorted(positions)
+    holes = [frame for frame in range(frames[0], frames[-1] + 1)
+             if frame not in positions] if frames else []
+    return positions, holes
+
+
+def spansHole(frameRange, holes):
+    '''Whether a frame to be cut has a missing burst inside it'''
+    if frameRange[1] == 0:
+        return False
+    first, last = frameRange[0], frameRange[0] + frameRange[1] - 1
+    return any(first <= hole <= last for hole in holes)
+
+
 def checkBurstTimes(orbit, seq, framing):
     '''
-    Read the burst file and check for errors and gaps
+    Read the burst file and check for errors and gaps.
+
+    A burst that went missing during assembly only matters where a frame being
+    cut runs over it: that piece would be cut short of the bursts it names,
+    while one wholly on either side of the hole is untouched (makeSetupFile
+    reads the burst positions out of this same file, so the cut does not slide
+    past a hole it never crosses).  So the framing decides, and a hole nothing
+    is being cut over is left to the caller to report.
     '''
     #
     # Find the burst times file
@@ -185,19 +227,27 @@ def checkBurstTimes(orbit, seq, framing):
     #
     fin = open(burstTimes[0], 'r')
     count = 0
+    holes = []
     for burst in fin:
         burst = burst.strip('\n')
         num, time, burstNum = [eval(x) for x in burst.split()]
         if count == 0:
             first = burstNum
         elif burstNum - first != count:
-            fin.close()
-            raise SetupError('gap', f'\n\n ***** Gap in burst times ******\n\n '
-                                    f'{burstTimes[0]} burstnum={burstNum}',
-                             slc=d, orbit=orbit, seq=seq)
+            holes += list(range(first + count, burstNum))
+            count = burstNum - first
         count += 1
     last = burstNum
     fin.close()
+    spanning = [frameRange for frameRange in framing
+                if spansHole(frameRange, holes)]
+    if spanning:
+        raise SetupError('gap', f'\n\n ***** Gap in burst times ******\n\n '
+                                f'{burstTimes[0]} burstnum={holes[0]} '
+                                f'is missing, inside frame'
+                                f'{"" if len(spanning) == 1 else "s"} ' +
+                                ' '.join(f'{f[0]}-{f[1]}' for f in spanning),
+                         slc=d, orbit=orbit, seq=seq)
     return(first, last)
 
 
@@ -262,6 +312,59 @@ def checkRange(frameRange, first, last, slc, done):
                      frameRange=list(frameRange))
 
 
+def correctBurstPositions(setupfile, orbit, seq, frameRange):
+    '''
+    Put the true burst positions into a setup file just written.
+
+    setuptopsimage works the position of a burst out as frame - firstFrame + 1,
+    which is right only while the numbering runs unbroken.  Where a burst went
+    missing during assembly the frame numbers step over it -- correctly, that
+    is the record of what is not there -- and every burst past it sits one
+    line earlier in the file than the arithmetic says, so the piece would be
+    cut a burst late.  The positions are read back out of the burst times
+    instead, which is where they were recorded in the first place.
+
+    Nothing is rewritten unless it disagrees, so on an unbroken acquisition
+    this does nothing at all.  Returns the correction as (old, new) pairs.
+    '''
+    positions, holes = burstPositions(orbit, seq)
+    if not holes:
+        return []
+    firstFrame = frameRange[0]
+    lastFrame = firstFrame + frameRange[1] - 1
+    wanted = {'firstBurst': positions.get(firstFrame),
+              'lastBurst': positions.get(lastFrame)}
+    if None in wanted.values():
+        #
+        # An end of the piece is a burst that is not there.  checkBurstTimes
+        # refuses to cut over a hole, so this should not be reachable, and
+        # guessing at it is worse than leaving the file as setuptopsimage
+        # wrote it
+        #
+        print(f'*** {setupfile}: frames {firstFrame}-{lastFrame} are not both '
+              f'in the burst times of {orbit}-{seq}, burst positions left as '
+              'they were')
+        return []
+    corrected, lines = [], []
+    for line in open(setupfile, 'r'):
+        for name, position in wanted.items():
+            if line.startswith(f'set {name}='):
+                was = line.split('=')[-1].strip()
+                if was != str(position):
+                    corrected.append((f'{name} {was}', str(position)))
+                    line = f'set {name}={position}\n'
+        lines.append(line)
+    if corrected:
+        with open(setupfile, 'w') as fout:
+            fout.writelines(lines)
+        one = len(holes) == 1
+        print(f'    {setupfile}: {len(holes)} burst{"" if one else "s"} '
+              'missing before this piece, so the burst positions were '
+              'corrected: ' +
+              ', '.join(f'{was} -> {now}' for was, now in corrected))
+    return corrected
+
+
 def makeSetupFile(orbit, seq, ascdesc, frameRange):
     '''
     Create Setup file
@@ -286,6 +389,7 @@ def makeSetupFile(orbit, seq, ascdesc, frameRange):
     os.remove(filetmp)
     # check setup file was created
     if os.path.isfile(setupfile):
+        correctBurstPositions(setupfile, orbit, seq, frameRange)
         # make file executable
         call(f'chmod +x {setupfile}', shell=True)
         return(setupfile)
@@ -447,7 +551,7 @@ def setupSeveralImages(check=False, firstDate=None, lastDate=None, frames=None,
         lastDate = datetime(2100, 1, 1)
     result = {'setupFiles': [], 'skipped': [], 'errors': [], 'runfile': None,
               'removed': [], 'pending': [], 'keptRunFiles': [], 'noSLCs': [],
-              'noAscNode': []}
+              'noAscNode': [], 'outOfRange': []}
     #
     # Get ascending or descending status
     #
@@ -530,15 +634,29 @@ def setupSeveralImages(check=False, firstDate=None, lastDate=None, frames=None,
             # collecting caller still hears about every frame
             #
             try:
-                if not checkRange(frameRange, first, last, slc, done):
-                    continue
                 outdir = f'{orbit}_{frameRange[0]}'
-                if os.path.isdir(outdir):
-                    # add to done if it already exists
-                    done.append(f'setup_{orbit}_{frameRange[0]}')
-                    result['skipped'].append(outdir)
-                    if not quiet:
-                        print('Skipping ', outdir, ' Already exists')
+                #
+                # Already built, so there is nothing to cut and the frame is
+                # not range checked.  The SLCs are re-downloaded from time to
+                # time and can come back covering fewer bursts than the piece
+                # was cut from; asking whether data that needs no cutting
+                # could be cut is what used to stop the run over a piece that
+                # exists and pairs.  Reported instead, since it does mean the
+                # piece could not be cut again from what is there now
+                #
+                if frameRange[1] > 0 and os.path.isdir(outdir):
+                    setupfile = f'setup_{orbit}_{frameRange[0]}'
+                    if setupfile not in done:
+                        # add to done if it already exists
+                        done.append(setupfile)
+                        result['skipped'].append(outdir)
+                        if (frameRange[0] < first or
+                                frameRange[0] + frameRange[1] - 1 > last):
+                            result['outOfRange'].append((outdir, first, last))
+                        if not quiet:
+                            print('Skipping ', outdir, ' Already exists')
+                    continue
+                if not checkRange(frameRange, first, last, slc, done):
                     continue
                 if check:
                     print(slcDate, orbit, seq, ascdesc, frameRange)

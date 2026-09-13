@@ -25,6 +25,11 @@ No positional arguments. With no options it re-derives the last 12 acquisitions,
 existing `orbitframes` entries, and prints the proposal next to what was built. Only the
 acquisitions not yet built can be written; the rest are derived for the comparison alone.
 
+An older acquisition that has never been framed is taken in as well, however far past those 12
+it is, as long as the setup check reads it — see
+[Reaching back over what was never framed](#reaching-back-over-what-was-never-framed). It is
+listed in a section of its own, so what is committed is still what was shown.
+
 `-lookBack 0` gives the other behaviour: propose only for the acquisitions that have not been
 framed yet — the same "no `<orbit>_<firstBurst>` directory" test `setupSeveralTopsImages` uses —
 and list separately any matching pieces needed in acquisitions already framed.
@@ -35,7 +40,7 @@ and list separately any matching pieces needed in acquisitions already framed.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-lookBack N` | 12 | Re-derive the last N acquisitions, ignoring their existing `orbitframes` entries, and print the proposal next to what was built; `0` proposes for the not-yet-framed acquisitions instead |
+| `-lookBack N` | 12 | Re-derive the last N acquisitions, ignoring their existing `orbitframes` entries, and print the proposal next to what was built; `0` proposes for the not-yet-framed acquisitions instead. An older acquisition the setup check reads and nothing has framed is taken in whatever N says |
 | `-compare` | False | Re-derive the **whole** record and compare against the existing files |
 | `-dump` | False | Print the proposed entries for the whole record, as a complete replacement `orbitframes` |
 | `-plot` | False | Show the track as a plot (see below) |
@@ -60,7 +65,9 @@ and list separately any matching pieces needed in acquisitions already framed.
 |--------|---------|-------------|
 | `-commit` | False | Write the entries just proposed into `orbitframes` — replacing the lines of the not-yet-built orbits, appending to the built ones, leaving every other line alone — then build the setup scripts for them |
 | `-noSetup` | False | Stop after `orbitframes`: the framing is still checked with `setupSeveralTopsImages`, but no `setup_` scripts and no `runSetup` driver are written |
-| `-undo` | False | Restore the `orbitframes` from before the last `-commit`; repeat to step further back |
+| `-acceptGaps` | False | Go on without asking where a burst is missing from an assembled SLC (see [A burst that really is missing](#a-burst-that-really-is-missing)); the frames clear of the hole are cut as they always were, the ones over it still cannot be built |
+| `-undo` | False | Restore the `orbitframes` from before the last `-commit`, saying how far back that is and asking before writing; repeat to step further back |
+| `-undoNoPrompt` | False | `-undo` without the confirmation prompt, for a run with nobody at the terminal |
 | `-refreshLinks` | False | Link the assembled `<orbit>-<seq>` directories that have no link here yet |
 | `-linkAll` | False | With `-refreshLinks`, link every unlinked directory whatever its age |
 | `-undoLinks` | False | Remove the links made by the last `-refreshLinks` |
@@ -183,8 +190,55 @@ neither new nor worth fixing — and one of them would block the commit. `-first
 how an older stretch, or the whole record, is deliberately taken in. A track with nothing built
 yet is not narrowed at all.
 
+### Reaching back over what was never framed
+
+That window is normally wider than the stretch `-lookBack` re-derives, and the two have to
+agree on one thing: everything the check reads must have been framed by somebody. An
+acquisition with no `orbitframes` lines of its own is not skipped by `determineFraming` — it
+falls back to **every** default `frames` entry, and a default its coverage cannot carry raises
+`not in burst time range` and stops the commit for every other acquisition too.
+
+So the derivation reaches back to the earliest acquisition in the check window that still has its
+SLCs and has nothing the check can read — unbuilt, or built with no `orbitframes` lines of its
+own (see [Acquisitions already built are never
+rewritten](#acquisitions-already-built-are-never-rewritten)) — and frames those as well:
+
+```
+10 acquisitions older than the last 12 have never been framed, and the setup step checks them
+too, so they are framed here as well (back to 2026-04-06):
+# 63957-0/frames.669.724
+63957-1-669-5
+63957-2-674-44
+63957-3-0-0
+...
+    6 of them already have orbitframes lines, which are replaced by what is derived here;
+    nothing was ever built from them, so no key that pairs can move: 7181 7356 7531 ...
+```
+
+The zero-length lines are the fix: `checkRange` skips a frame of no bursts, so a `frames` entry
+this acquisition cannot cover stops being asked of it.
+
+Nothing already framed is disturbed by the wider reach. Only built acquisitions carry a framing
+forward (`referenceFraming`), so an acquisition pulled in here can never become the reference
+for another, and the entries proposed for the last N are identical either way. A built
+acquisition inside the reach keeps its own lines as always. On a track with no backlog the
+reach changes nothing at all.
+
 Setup scripts waiting on pieces outside those dates are reported and left alone — nothing in the
 window replaced them, so they are not cleaned away either.
+
+**A piece already built is not range checked.** There is nothing to cut, so whether it *could* be
+cut is not a question worth asking — and the SLCs are re-downloaded from time to time and come
+back covering fewer bursts than the piece was cut from, which used to stop the run over a
+directory that exists and pairs. It is reported instead, since it does mean the piece could not
+be produced again from what is on disk now:
+
+```
+    18 pieces would be set up, 39 already built
+    6 pieces already built are no longer covered by the SLCs now on disk, which have been
+    re-downloaded since; left as they are, but they could not be cut again:
+    7108_675(596-713) 7283_675(596-713) ...
+```
 
 **If anything failed, nothing is written at all** — not `orbitframes`, not a single script — and
 the run exits non-zero:
@@ -192,6 +246,7 @@ the run exits non-zero:
 ```
 *** setupSeveralTopsImages reports 1 problem with this framing:
     4223-0 frame 9000-40: ***** Frames 9000 to 9039 for 4223-0 not in burst time range 623 to 668 ...
+        this is the framing proposed here -- fix `frames` or `orbitframes` and run again
 
 nothing written -- neither orbitframes nor any setup script. Fix `frames` or `orbitframes` and run again.
 ```
@@ -200,6 +255,17 @@ The failures are reported in red, never worked around: the fix belongs in `frame
 `orbitframes` and is the user's call. The kinds are the ones `setupSeveralTopsImages` has always
 raised — a frame outside the burst range, a gap in the burst times, a missing `.btimes` file, an
 unreadable `ascendingNodeTime`.
+
+The check reads more of the record than any one run proposes for, so the second line says which
+kind of failure it is and therefore where the fix belongs:
+
+| what it says | what it means |
+|---|---|
+| this is the framing proposed here | the derivation is wrong for an orbit this run would write |
+| already built, so its orbitframes lines are never rewritten here | fix that orbit's lines by hand — segmentTrack will not touch them |
+| a frame is cut over a burst that is missing | reframe it either side of the hole, or re-assemble the acquisition — a hole no frame crosses does not get here |
+| it has no burst times to frame from | a data problem; the directory needs repairing, no framing answers it |
+| nothing is proposed for it | it is checked against `frames` as it stands — give it lines by hand, or reach it with `-firstdate`/`-lookBack` |
 
 A burst-numbering slip never gets this far: it is repaired before the coverage is used — see
 [Slipped burst numbering](#slipped-burst-numbering).
@@ -243,14 +309,26 @@ the newest backup and drops it, so repeating it steps further back; `-undoLinks`
 links from the last refresh, leaving alone any that have been repointed by hand since. The two
 are separate: `-undo` never touches links.
 
+`-undo` names the backup it is about to put back and dates it before writing anything —
+
+```
+-undo puts back the orbitframes as it stood at 2026-08-25 09:14:02, 2 days 5 hours ago
+    everything committed since then is discarded (orbitframesBackup/orbitframes.bak.20260825T091402)
+    restore it? [y/N]
+```
+
+— because the stack goes back as far as the commits do, and the newest backup is only this
+session's work if this session is what last committed. Anything but `y`/`yes` leaves
+`orbitframes` alone. `-undoNoPrompt` does the same restore without asking; a run with no
+terminal to ask on answers no, so that is the flag for a script.
+
 ---
 
 ## Slipped burst numbering
 
-A directory whose burst numbers do not run consecutively cannot be framed —
-`setupSeveralTopsImages.checkBurstTimes` aborts the whole track on it. Usually nothing is actually
-missing: `computeBurstTimes` used to round each burst separately, so a swath whose times sit near
-a half-period boundary numbered two bursts the same, or stepped over one (see
+A directory whose burst numbers do not run consecutively is usually not missing anything:
+`computeBurstTimes` used to round each burst separately, so a swath whose times sit near a
+half-period boundary numbered two bursts the same, or stepped over one (see
 [computeBurstTimes](computeBurstTimes.md#how-bursts-are-numbered)).
 
 Those are repaired **before anything is derived from the coverage**, so the acquisition is framed
@@ -264,15 +342,51 @@ in the same run:
 committed 4 entries for 4 orbits
 ```
 
-Only directories this run would actually segment are touched — never a sweep of the tree, and
-never one whose SLCs have been cleaned away. Three cases are reported and left alone:
+Only directories this run would actually read are touched — those inside the
+[setup step's window](#the-setup-step), never a sweep of the tree, and never one whose
+SLCs have been cleaned away. A track carries a decade of acquisitions and the old ones were
+assembled from SLCs long since deleted, so a hole in one of those is neither new nor anything
+this run can act on. Three cases are reported and left alone:
 
-- recomputing gives the same numbering, so the bursts really are missing and nothing can be built
-  from that directory (reported in red as a hole, and it still stops the setup check);
+- recomputing gives the same numbering, so a burst really is missing — see
+  [A burst that really is missing](#a-burst-that-really-is-missing);
 - recomputing would move the *first* burst number, which is the piece key;
 - the `.tops_par` files or `ascendingNodeTime` are not there to recompute from.
 
 `-dump` skips the repair, so it stays a clean replacement `orbitframes` on stdout.
+
+### A burst that really is missing
+
+A burst lost during assembly is rare, and the numbering records it correctly: the frame counter
+steps over the burst that is not there (`... 566, 568 ...`). What it costs is only the frames cut
+**over** the hole. A frame wholly on either side of it is cut exactly as it always was, because
+`makeSetupFile` reads the burst positions back out of the `.btimes` rather than trusting
+`setuptopsimage`, which works a position out as `frame − firstFrame + 1` and so slides everything
+past a hole one burst late:
+
+```
+setup_65023_573: 1 burst missing before this piece, so the burst positions were
+corrected: firstBurst 17 -> 16, lastBurst 61 -> 60
+```
+
+On an unbroken acquisition the two agree and nothing is rewritten.
+
+So the hole is reported, drawn against the frames being cut, and put to the user rather than
+ending the run:
+
+```
+*** 65023-0: burst 567 is missing from the assembled SLC
+    the numbering steps over the hole, which is the record of what is not there; it is the
+    frames cut over it that cannot be built
+    frame 573-617 is clear of it and is cut as it always was
+
+go on with these acquisitions? [y/N]
+```
+
+Anything but `y`/`yes` stops the run and writes nothing, and a run with no terminal to ask on
+answers no — so `-acceptGaps` is how an unattended run says yes in advance. A frame that *does*
+run over the hole is still refused by `checkBurstTimes`, and reframing it to sit either side of
+the hole, or re-assembling the acquisition, is the fix.
 
 ---
 
@@ -417,6 +531,24 @@ appended** after its existing lines, where a key introduced further along needs 
 with. `-commit` reports these separately, and they take an index above everything that orbit
 already uses so `determineFraming` adds them rather than replacing part of its framing.
 
+**The one other thing written for a built acquisition is the lines it has none of.** `frames` is
+only a default, and a track's default is edited over the years — widened as the coverage grows,
+moved when the datatake does. An acquisition built under an older one and never given lines of
+its own is then read against a default it does not fit, and the setup step stops on it:
+
+```
+track-133   frames 402-62        every acquisition covers 391-412
+            180 orbitframes entries, every one 400-12
+            six orbits built at 400 with no entry at all
+      ->    63905-0 frame 402-62: Frames 402 to 463 not in burst time range 391 to 412
+```
+
+Writing those lines is what the file is for, so they are written — taken from what was actually
+built (`setup_63905_400` cut bursts 10-21, so `63905-1-400-12`), which is the plan that produced
+the directories on disk. Only an acquisition with **no lines at all** is given any: one that has
+them was framed deliberately, and a default it cannot cover is then a real thing to fix by hand
+rather than to guess at.
+
 ### How well the rules reproduce the record
 
 Scored over the whole record of all 30 Greenland tracks — 2500 built acquisitions — the rules
@@ -538,6 +670,13 @@ apart, which collapses the rows into two distant bands; the labels therefore run
 
 Combine with `-lookBack N` to narrow the plot to the last N acquisitions — a decade on one axis is
 unreadable.
+
+The plot covers the stretch the report covered, backed up over the last few built acquisitions
+(`-refBack`, 3 by default — the same number `referenceFraming` counts as neighbours). Without
+that it would show none of them: the stretch being proposed for is the stretch nothing has been
+built from, so on a track with a backlog the built pieces — the dark bands and ticks the
+proposal is read against — all lie before it. Those extra rows are context only; an acquisition
+already built is drawn faded and is never written.
 
 ### Committing from the plot
 

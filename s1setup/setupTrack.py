@@ -159,6 +159,21 @@ def tiffsPresent(orbitPath):
     return bool(glob.glob(os.path.join(orbitPath, '*.SAFE', 'measurement', '*.tiff')))
 
 
+def writeSingleSafeTab(outputDir, date, seq):
+    """Write SLC_tab_<date>-<seq> in outputDir for a single-SAFE unit: one
+    line per swath of slc, slc.par, tops_par as bare file names, the same form
+    catMultipleTops leaves for multi-SAFE units. Returns (tabPath, nSwaths)."""
+    base = f'{date}-{seq}'
+    tabPath = os.path.join(outputDir, f'SLC_tab_{base}')
+    slcs = sorted(glob.glob(os.path.join(outputDir, f'{base}_iw?_hh.slc')))
+    with open(tabPath, 'w') as fp:
+        for slc in slcs:
+            name = os.path.basename(slc)
+            root = name[:-len('.slc')]
+            fp.write(f'{name}  {name}.par  {root}.tops_par\n')
+    return tabPath, len(slcs)
+
+
 def slcScratchDir(orbitPath, orbitScratch):
     """Return orbitScratch if /dev/shm has enough room, else None (fall back to orbit dir).
 
@@ -471,11 +486,13 @@ def _runSteps(orbitPath, scratchBase, trackDir, orbitName, outputDir, logfp, qui
         srcDir = slcDest if slcDest else orbitPath
         os.makedirs(outputDir, exist_ok=True)
         nMoved = 0
+        date = None
         for fname in sorted(os.listdir(srcDir)):
             m = re.match(r'^(\d{8})t\d{6}(_iw\d_hh\..+)$', fname)
             if not m:
                 continue
-            newName = f'{m.group(1)}-{seq}{m.group(2)}'
+            date = m.group(1)
+            newName = f'{date}-{seq}{m.group(2)}'
             shutil.move(os.path.join(srcDir, fname),
                         os.path.join(outputDir, newName))
             logfp.write(f'  {fname}  ->  {newName}\n')
@@ -486,20 +503,25 @@ def _runSteps(orbitPath, scratchBase, trackDir, orbitName, outputDir, logfp, qui
             logfp.write(f'ERROR: no SLC files found in {srcDir}\n')
             return False, f'no SLC files found in {srcDir}'
         print(f'  [catMultipleTops] {nMoved} file(s) moved to {os.path.basename(outputDir)}')
+        # The setup_<orbit>_<burst> scripts start from `ls SLC_tab*-<seq>` in
+        # this dir; without the tab every Gamma step in them runs with empty
+        # arguments. catMultipleTops writes it for multi-SAFE units.
+        tabPath, nSwaths = writeSingleSafeTab(outputDir, date, seq)
+        logfp.write(f'wrote {os.path.basename(tabPath)} ({nSwaths} swaths)\n')
         # Clean up scratch dir (catMultipleTops handles this itself in the multi-SAFE path)
         if slcDest and os.path.isdir(orbitScratch):
             shutil.rmtree(orbitScratch, ignore_errors=True)
             logfp.write(f'removed scratch: {orbitScratch}\n')
-        # Copy ascendingNodeTime and compute burst times.
-        # In the multi-SAFE path catMultipleTops does both; mirror that here.
-        srcAnt = os.path.join(orbitPath, 'ascendingNodeTime')
-        dstAnt = os.path.join(outputDir, 'ascendingNodeTime')
-        if os.path.exists(srcAnt):
-            shutil.copy2(srcAnt, dstAnt)
-            logfp.write(f'copied ascendingNodeTime -> {os.path.basename(outputDir)}/\n')
-        else:
-            print(f'{RED}  *** ascendingNodeTime not found in {orbitPath}{RESET}')
-            logfp.write(f'WARNING: ascendingNodeTime not found in {orbitPath}\n')
+        # Copy ascendingNodeTime and absolutegain, then compute burst times.
+        # In the multi-SAFE path catMultipleTops does all three; mirror that here.
+        for sidecar in ('ascendingNodeTime', 'absolutegain'):
+            src = os.path.join(orbitPath, sidecar)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(outputDir, sidecar))
+                logfp.write(f'copied {sidecar} -> {os.path.basename(outputDir)}/\n')
+            else:
+                print(f'{RED}  *** {sidecar} not found in {orbitPath}{RESET}')
+                logfp.write(f'WARNING: {sidecar} not found in {orbitPath}\n')
         if not runStep(['computeBurstTimes.py'], outputDir, logfp,
                        'computeBurstTimes', quiet=quiet):
             return False, 'computeBurstTimes'

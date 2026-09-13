@@ -7,5 +7,5 @@
 __all__ = ['catMultipleTops', 'checkframes', 'cloneSLCdir', 'computeBurstTimes',
            'cullSLCclones', 'dequeuePboss', 'findgain', 'radcalcoeffs',
            'runPreProcTops', 's1XMLreader', 'setupSeveralTopsImages',
-           'setupStrackReg', 'setupTrack', 'setupS1Tracks',
+           'setuppairs', 'setupStrackReg', 'setupTrack', 'setupS1Tracks',
            'trimTopsSLCsToFit', 'updateS1State']

@@ -67,6 +67,8 @@ def parseRunBoth(runboth):
         for line in fp:
             if 'setupStrackReg.py' in line:
                 break
+        else:
+            line = ''  # no setupStrackReg line: runboth incomplete
     if len(line) > 1:
         line = line.split('--frame')[1].strip()
         return dict(zip(['frame', 'orbit1', 'orbit2', 'sensor'],
@@ -81,6 +83,7 @@ def removeIfDuplicate(runbothClone, runbothOrig, myArgs):
     if orig is None or clone is None:
         print(f'skiping {runbothClone} because one of the runboths is '
               'incomplete')
+        return 0
     match = True
     for key in clone:
         if clone[key] != orig[key]:

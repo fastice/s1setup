@@ -113,7 +113,7 @@ commit; `-firstdate`/`-lastdate` override the window. An interactive `-plot` run
 
 - Steps 1–2 run in `track-N/` against the raw orbit dir; step 3 runs inside the orbit dir; step 4 produces the merged output dir `<orbit>-<seq>/`; step 5 writes into that output dir.
 - If `frameRange` doesn't exist in the track dir, step 3 is skipped.
-- If only one `.SAFE` is present, step 4 is skipped — SLCs are renamed (`YYYYMMDDtHHMMSS_iwN_hh.* → YYYYMMDD-<seq>_iwN_hh.*`) and moved directly, and `computeBurstTimes` is still run.
+- If only one `.SAFE` is present, step 4 is skipped — SLCs are renamed (`YYYYMMDDtHHMMSS_iwN_hh.* → YYYYMMDD-<seq>_iwN_hh.*`) and moved directly; `setupTrack` then writes `SLC_tab_YYYYMMDD-<seq>` and copies `absolutegain` + `ascendingNodeTime` into the output dir (what `catMultipleTops` does for multi-SAFE units — the `setup_<orbit>_<burst>` scripts start from `ls SLC_tab*-<seq>`, so a unit without the tab hangs them), and `computeBurstTimes` is still run.
 - Sentinel files `Completed`/`Failed` mark orbit-dir state; `Ignore` skips an orbit entirely.
 
 ### Downstream (pair setup, not orchestrated by setupTrack)
@@ -126,7 +126,7 @@ track-N/<orbit1>-<seq>/  +  track-N/<orbit2>-<seq>/
         offset-tracking mode (--strackOffsets): strack (full res) → cullst (via `cleanoff` script)
 ```
 
-`setupStrackReg` is "usually called from `setuppairs.py`" (outside this package) rather than directly.
+`setupStrackReg` is usually reached via `setuppairs` (this package) → `setupSARpair.py` (still in `insarScripts/bin`) → the generated `runboth`, rather than called directly.
 
 Its offset outputs are **GeoTIFF + tiff-backed VRT by default**; `--noTiff` reverts to raw binary,
 and the older `--tiff` is still accepted (it now asks for what already happens), so the
@@ -149,6 +149,7 @@ so the whole chain stays in one format.
 | `checkframes` | Scans orbit dirs for burst/frame coverage gaps and early/late frames; can move/split problematic SAFEs |
 | `segmentTrack` | Proposes `orbitframes` entries from the `.btimes` burst coverage and drives `setupSeveralTopsImages` over the proposal; writes nothing without `-commit` |
 | `setupSeveralTopsImages` | Creates per-orbit/frame `setup_orbit_frame` scripts via Gamma's `setuptopsimage`, reading `frames`/`orbitframes` control files (or lists passed by `segmentTrack`) |
+| `setuppairs` | Runs `grepdate` per frame and calls `setupSARpair.py` (still in `insarScripts/bin`) for every `o--` acquisition whose gap to the next same-frame acquisition is 0 < nDays <= sensor `maxDays` — consecutive pairs only, any separation (1, 5, 6, 7, 12, 13 ... days); `--check` dry-runs |
 | `setupStrackReg` | Per-pair registration (`coarsereg` + Gamma offset_* + `simoffsets.py` + `strack`) or full offset tracking + culling (`strack` + `cullst` via `cleanoff`) |
 | `cloneSLCdir` | Clones an SLC directory for a sensor/date range — copies small metadata, symlinks large `.slc`/`.pow` files |
 | `cullSLCclones` | Companion to `cloneSLCdir` — removes duplicate `runboth` files from clones whose `setupStrackReg.py --frame` params match the original |
