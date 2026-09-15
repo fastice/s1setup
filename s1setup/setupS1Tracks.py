@@ -738,6 +738,47 @@ def inSecondaryTree(trackDirs):
                for d in trackDirs)
 
 
+def secondaryFirstYear(secondaryDir, tracks):
+    """
+    Earliest acquisition year present in a secondary tree, or None if unknown.
+
+    The secondaries are newer satellites brought online in the last couple of
+    years, so asking one to process the prime's full year list makes maketies
+    produce no tie_plan for the years before it existed. Read the year straight
+    from the SLC parameter files ("date:  2026 06 13 ..."), which is the only
+    source that exists before any processing has been done - tie_plan<year>
+    files cannot be used, since those are an output of the run being clamped.
+
+    Guards the parse to plausible years: some .par variants carry a different
+    date layout and yield values like 12 or 30 in that field.
+    """
+    years = set()
+    for track in tracks:
+        for par in glob.glob(os.path.join(secondaryDir, track, '*_*', '*.slc.par')):
+            try:
+                with open(par, errors='replace') as fp:
+                    for line in fp:
+                        if line.startswith('date:'):
+                            fields = line.split()
+                            if len(fields) > 1 and fields[1].isdigit():
+                                y = int(fields[1])
+                                if 1990 <= y <= 2100:
+                                    years.add(y)
+                            break
+            except Exception:
+                continue
+    return min(years) if years else None
+
+
+def clampYearsForSecondary(secondaryDir, tracks, years):
+    """Drop years earlier than the secondary's first acquisition."""
+    first = secondaryFirstYear(secondaryDir, tracks)
+    if first is None:
+        return years, None
+    kept = [y for y in years if int(y) >= first]
+    return kept, first
+
+
 def reinvokeInSecondary(secondaryDir, extraArgs):
     """Re-run this program in a secondary project (cwd=secondaryDir) so its own
     project.yaml/tracks drive it. --noSecondary is expected in extraArgs to stop
@@ -943,8 +984,18 @@ def main():
                      '--nThreads', str(args.nThreads), '--noSecondary']
             # Always pass the resolved list (not args.year) so the secondary
             # rebuilds exactly the years the prime just did, rather than falling
-            # back to its own default.
-            extra += ['--year', *[str(y) for y in years]]
+            # back to its own default -- but clamped to the years this secondary
+            # could possibly have. These are newer satellites: asking S1D (first
+            # acquisitions 2026) to rebuild 2015 yields no tie_plan2015 and used
+            # to abort the whole cascade, taking velocityStats with it.
+            secYears, firstYear = clampYearsForSecondary(sec, secTracks, years)
+            if firstYear is not None and len(secYears) < len(years):
+                print(f'  {os.path.basename(sec)}: first acquisition {firstYear}, '
+                      f'processing {len(secYears)} of {len(years)} years')
+            if not secYears:
+                print(f'Skipping secondary {sec}: no data in the requested years')
+                continue
+            extra += ['--year', *[str(y) for y in secYears]]
             reinvokeInSecondary(sec, extra)
         # 5: rebuild velocityStats from the culled velocity/ dirs (prime frames
         # plus the just-rebuilt secondary frames, via velocityStats.py).
