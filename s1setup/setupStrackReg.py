@@ -12,6 +12,13 @@ import os
 import subprocess
 import stat
 
+# strack and coarsereg link libgdal, which drags in libopenblas; its constructor spawns an idle
+# thread pool sized to the machine (~60 threads, ~9 GB of reserved address space)
+# before main() runs. Nothing in GrIMP uses BLAS, and the pool can only be capped
+# from the environment. OPENBLAS_NUM_THREADS, never OMP_NUM_THREADS, which would
+# serialise strack's own OpenMP loop.
+BLAS_ENV = dict(os.environ, OPENBLAS_NUM_THREADS='1')
+
 ISPpath = '/home/ian/gammaISP/GAMMA_SOFTWARE-20160611/ISP/bin/'
 
 
@@ -139,7 +146,8 @@ def mkSLC2link(orbit2, frame, slcFiles2, resetPar=False):
 def coarseReg(slcFiles1, slcFiles2, path1, path2):
     myLog.logEntry('coarseReg')
     myArgs = [f'{path1}/{slcFiles1["geo"]}', f'{path2}/{slcFiles2["geo"]}']
-    myOutput = u.callMyProg('coarsereg', myArgs=myArgs, logger=myLog)
+    myOutput = u.callMyProg('coarsereg', myArgs=myArgs, logger=myLog,
+                             env=BLAS_ENV)
     dr, da = [int(x) for x in myOutput.split()]
     myLog.logReturn('coarseReg')
     return dr, da
@@ -347,7 +355,8 @@ def runStrackRegister(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
             myArgs.append('-tiff')
         myArgs.append(strackFile)
         # run strack
-        u.callMyProg('strack', myArgs=myArgs, screen=True, logger=myLog)
+        u.callMyProg('strack', myArgs=myArgs, screen=True, logger=myLog,
+                     env=BLAS_ENV)
         # run cull
         cullFile = s.makeCullFile(sensorInfo, offsetFile, orbit1, orbit2,
                                   frame, scaleFactor, register=True, tiff=tiff)
@@ -410,7 +419,8 @@ def runStrack(slcFiles1, slcFiles2, sensorInfo, orbit1, orbit2, frame,
     myArgs.append(strackFile)
     # call matcher
     if not setupOnly:
-        u.callMyProg('strack', myArgs=myArgs, screen=True, logger=myLog)
+        u.callMyProg('strack', myArgs=myArgs, screen=True, logger=myLog,
+                     env=BLAS_ENV)
     # check file size for failed strack or not prev run strack (cullOnly case).
     # In tiff mode strack writes a tiff-backed VRT (no raw .da) - validate it.
     if tiff:
