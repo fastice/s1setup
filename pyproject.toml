@@ -32,6 +32,8 @@ Homepage = "https://github.com/fastice/s1setup"
 Repository = "https://github.com/fastice/s1setup"
 
 [project.scripts]
+sweepS1 = "s1setup.sweepS1:main"
+"sweepS1.py" = "s1setup.sweepS1:main"
 catMultipleTops = "s1setup.catMultipleTops:main"
 "catMultipleTops.py" = "s1setup.catMultipleTops:main"
 checkframes = "s1setup.checkframes:main"
