@@ -595,6 +595,13 @@ def runAutoClean(trackDirs, nThreads, sigThresh):
     tracks run one at a time to avoid oversubscribing the budget. Aborts if any
     track fails."""
     for trackDir in trackDirs:
+        # A secondary (12-day) tree carries tracks whose frames have no offsets
+        # yet (single SLCs, not yet paired); autoclean.py dies on those, so skip
+        # them the way it would find nothing to clean.
+        if not u.globOffsetProducts(os.path.join(trackDir, '*_*', 'azimuth.offsets')):
+            print(f'Skipping autoclean in {trackDir}: no *_*/azimuth.offsets '
+                  '(no offsets processed yet)')
+            continue
         cmd = f'autoclean.py -threads={nThreads} -sigThresh={sigThresh}'
         print(f'Running: {cmd}  (in {trackDir})')
         runChecked(cmd, trackDir, 'autoclean')
@@ -681,9 +688,23 @@ def syncThumbHeadersFromPrime(trackDirs, primeDir):
         primeTp = os.path.join(primeDir, track, 'tiepoints')
         if not os.path.isdir(tpdir):
             os.makedirs(tpdir)
+        # tie_plan_header too: maketies -> setuptopstie dies without it, even on
+        # a track that has no pairs yet, and only the -tiesOnly pass surfaces it.
+        primeTie = os.path.join(primeTp, 'tie_plan_header')
+        destTie = os.path.join(tpdir, 'tie_plan_header')
+        if os.path.exists(primeTie) and not os.path.exists(destTie):
+            with open(primeTie) as fp:
+                tieText = fp.read()
+            with open(destTie, 'w') as fp:
+                fp.write(tieText.replace(primeDir + '/',
+                                         os.path.abspath(PROJECT_DIR) + '/'))
+            print(f'Created {destTie} (secondary-rooted)')
         for primeHeader in sorted(glob.glob(
                 os.path.join(primeTp, 'vel_thumb_header_*dash*'))):
             name = os.path.basename(primeHeader)
+            # only real headers -- not a .save or backup copy sitting beside them
+            if not re.match(r'^vel_thumb_header_\d+dash\d+$', name):
+                continue
             dest = os.path.join(tpdir, name)
             newRes = _resolutionLine(primeHeader)
             if newRes is None:
