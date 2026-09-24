@@ -11,6 +11,7 @@ from datetime import datetime
 import glob
 import os
 import json
+import shutil
 
 
 def setupClone():
@@ -36,6 +37,10 @@ def setupClone():
     parser.add_argument('--check', action='store_true', default=False,
                         help='Check what will be done but do not change '
                         'anything')
+    parser.add_argument('--noRemoveRedundant', action='store_true',
+                        default=False,
+                        help='Cull duplicate runboths only; keep every clone '
+                        'directory (skip the redundant-clone removal)')
     #
     args = parser.parse_args()
     #
@@ -54,6 +59,7 @@ def setupClone():
                   f'{args.lastdate}')
     #
     myArgs = {'check': args.check,
+              'noRemoveRedundant': args.noRemoveRedundant,
               'sourcePath': args.sourcePath, 'track': args.track,
               'sensor': args.sensor,
               'firstdate': date1, 'lastdate': date2}
@@ -127,6 +133,83 @@ def parseGeojson(geojsonData, echo=False):
     return s1, date
 
 
+def primePairsSameSensor(sourceDir, sourceTrack, sensor):
+    '''
+    True if the prime already pairs this acquisition with the same sensor,
+    i.e. its runboth names a second orbit whose geojson carries `sensor`.
+    Such a pair is exactly what a clone would duplicate.
+    '''
+    pair = parseRunBoth(f'{sourceDir}/runboth') \
+        if os.path.exists(f'{sourceDir}/runboth') else None
+    if pair is None:
+        return False
+    partnerGeo = f'{sourceTrack}/{pair["orbit2"]}_{pair["frame"]}/' \
+        'geodat10x2.geojson'
+    if not os.path.exists(partnerGeo):
+        return False
+    return readGeojson(partnerGeo)[0] == sensor
+
+
+def offsetsExist(frameDir):
+    return len(glob.glob(f'{frameDir}/azimuth.offsets*')) > 0
+
+
+def isClone(cloneDir, sourceTrack):
+    ''' A clone holds symlinks into the prime track and no offsets. '''
+    links = [f for f in glob.glob(f'{cloneDir}/*') if os.path.islink(f)]
+    if not links or offsetsExist(cloneDir):
+        return False
+    prime = os.path.realpath(sourceTrack) + '/'
+    return all(os.path.realpath(f).startswith(prime) for f in links)
+
+
+def removeRedundantClones(myArgs, imageDirs):
+    '''
+    Delete clone directories that no longer serve a clone pair.
+
+    After the duplicate runboths are gone, a clone is kept only if it
+      - has offsets (a processed clone pair lives there),
+      - still has a runboth (it starts a clone pair),
+      - is the second image of a clone pair that has not been processed yet
+        (the pair needs its SLC link until runboth has run), or
+      - is not paired same-sensor by the prime (a clone pair start waiting
+        for its partner to be acquired).
+    Everything else is a copy of a frame the prime already pairs the same
+    way; it comes back from cloneSLCdir if it is ever needed as a second
+    image.  Returns the number removed.
+    '''
+    track, sourceTrack = myArgs['track'], \
+        f'{myArgs["sourcePath"]}/{myArgs["track"]}'
+    neededSecond = set()
+    for imageDir in imageDirs:
+        cloneDir = f'{track}/{imageDir}'
+        if os.path.exists(f'{cloneDir}/runboth') \
+                and not offsetsExist(cloneDir):
+            pair = parseRunBoth(f'{cloneDir}/runboth')
+            if pair is not None:
+                neededSecond.add(f'{pair["orbit2"]}_{pair["frame"]}')
+    nRemoved = 0
+    for imageDir in imageDirs:
+        cloneDir = f'{track}/{imageDir}'
+        if not os.path.isdir(cloneDir):
+            continue
+        if offsetsExist(cloneDir) or os.path.exists(f'{cloneDir}/runboth') \
+                or imageDir in neededSecond \
+                or not primePairsSameSensor(f'{sourceTrack}/{imageDir}',
+                                            sourceTrack, myArgs['sensor']):
+            continue
+        if not isClone(cloneDir, sourceTrack):
+            print(f'{cloneDir} is not a plain clone (kept)')
+            continue
+        if myArgs['check']:
+            print(f'would remove redundant clone {cloneDir}')
+        else:
+            shutil.rmtree(cloneDir)
+            print(f'removed redundant clone {cloneDir}')
+        nRemoved += 1
+    return nRemoved
+
+
 def main():
     # Parse args
     myArgs = setupClone()
@@ -136,6 +219,7 @@ def main():
     print(f'Total products = {len(originals)}')
     #
     nDup = 0
+    imageDirs = []
     for sourceDir in originals:
         myGeoJson = f'{sourceDir}/geodat10x2.geojson'
         # Skip if not geojson
@@ -147,6 +231,7 @@ def main():
         if (s1 == myArgs['sensor'] and date >= myArgs['firstdate']
                 and date <= myArgs['lastdate']):
             imageDir = os.path.basename(sourceDir)
+            imageDirs.append(imageDir)
             runbothOrig = f'{sourceDir}/runboth'
             runbothClone = f'{myArgs["track"]}/{imageDir}/runboth'
             #
@@ -154,6 +239,14 @@ def main():
                 # make the copy
                 nDup += removeIfDuplicate(runbothClone, runbothOrig, myArgs)
     print(f'Number of products removed {nDup}')
+    # A culled runboth leaves the clone dir behind; take those (and never-
+    # paired trailing clones) away too, unless a live clone pair needs them.
+    if myArgs['noRemoveRedundant']:
+        print('Redundant clone directories: not checked (--noRemoveRedundant)')
+        return
+    nDirs = removeRedundantClones(myArgs, imageDirs)
+    what = 'would be removed' if myArgs['check'] else 'removed'
+    print(f'Redundant clone directories {what}: {nDirs}')
 
 
 if __name__ == '__main__':
