@@ -42,12 +42,17 @@ def setuppairsArgs():
     parser.add_argument('--check', action='store_true', default=False,
                         help='Dry run - print the pairs and the '
                         'setupSARpair.py commands without running them')
+    parser.add_argument('--maxDays', type=int, default=None,
+                        help='Longest pair to set up, in days; can only lower '
+                        'the sensor limit (e.g. 12 for a same-sensor clone '
+                        'set) [sensor maxDays]')
     args = parser.parse_args()
     year = args.year[0]
 
     if year < 2008 or year > 2040:
         u.myerror('invalid year {0:d}'.format(year))
-    return year, args.sensor, [args.frame], args.region, args.tiff, args.check
+    return (year, args.sensor, [args.frame], args.region, args.tiff,
+            args.check, args.maxDays)
 #
 # Setup pairs and run command
 #
@@ -174,9 +179,12 @@ def main():
     ''' Run in track directory to set up pairs '''
     #
     # Get args
-    year, sensor, frames, region, tiff, check = setuppairsArgs()
+    year, sensor, frames, region, tiff, check, maxDaysArg = setuppairsArgs()
     # auto detect and valdidate sensore and ge maxDays
     maxDays, sensor = getMaxDaysAndSensor(sensor)
+    if maxDaysArg is not None:
+        # a cap, never an extension of the sensor's own limit
+        maxDays = min(maxDays, maxDaysArg)
     print(sensor, maxDays)
     # get frames
     if frames[0] < 0:

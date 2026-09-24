@@ -29,6 +29,7 @@ setuppairs [options] year
 | `--frame N` | all | Restrict to one frame number |
 | `--tiff` | False | Pass `--tiff` through to every generated `runboth`/`dofast` |
 | `--check` | False | Dry run — print each pair and the `setupSARpair.py` command that would run, without running it |
+| `--maxDays N` | sensor `maxDays` | Longest pair to set up; can only lower the sensor limit. `prepareS1Pairs` passes 12 in the same-sensor secondaries |
 
 ---
 

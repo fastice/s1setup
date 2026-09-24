@@ -12,6 +12,7 @@ import glob
 import os
 import shutil
 import json
+from s1setup.cullSLCclones import primePairsSameSensor
 
 
 def setupClone():
@@ -40,6 +41,16 @@ def setupClone():
     parser.add_argument('--noSkipIfExists', action='store_true', default=False,
                         help='Do not skip cases where an old copy already '
                         'exists')
+    parser.add_argument('--maxDays', type=int, default=None,
+                        help='Only clone a pair start whose next same-sensor '
+                        'acquisition of the frame is within this many days '
+                        '(e.g. 12 to keep a clone set to 12-day pairs); the '
+                        'newest acquisition is still cloned to await its '
+                        'partner [no limit]')
+    parser.add_argument('--requireSlc', action='store_true', default=False,
+                        help='Only clone acquisitions whose prime '
+                        '<orbit>_<frame>.slc exists and is not empty (a clone '
+                        'links it, so without it the clone cannot be paired)')
     #
     args = parser.parse_args()
     #
@@ -58,6 +69,7 @@ def setupClone():
                   f'{args.lastdate}')
     #
     myArgs = {'check': args.check, 'noSkipIfExists': args.noSkipIfExists,
+              'maxDays': args.maxDays, 'requireSlc': args.requireSlc,
               'sourcePath': args.sourcePath, 'track': args.track,
               'sensor': args.sensor,
               'firstdate': date1, 'lastdate': date2}
@@ -127,6 +139,88 @@ def duplicateDir(sourceDir, imageDir, track):
     return 1
 
 
+def slcExists(path):
+    """True if the SLC (or the file its link points at) exists and is not
+    empty."""
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def cloneWanted(candidates, sourceTrack, sensor, track, maxDays=None):
+    '''
+    Decide which prime dirs need a clone.
+
+    A clone exists to make the same-sensor 12-day pair the prime does not
+    make. So a prime dir is wanted as a pair START when the prime does not
+    already pair it with the same sensor, and as the SECOND image when the
+    previous same-sensor acquisition of the same frame is a start whose clone
+    pair has not been processed yet (once it has, the SLC link is not needed).
+    Anything else (the prime already makes its same-sensor pair) would only
+    ever be a copy the pair cull deletes the runboth of, so it is not created.
+    Returns {imageDir: reason} for the wanted ones.
+    '''
+    wanted = {}
+    byFrame = {}
+    for imageDir, date in candidates:
+        byFrame.setdefault(imageDir.split('_')[1], []).append((date, imageDir))
+    for frame, images in byFrame.items():
+        prevOpenStart = False
+        prevDate = None
+        images = sorted(images)
+        for k, (date, imageDir) in enumerate(images):
+            start = not primePairsSameSensor(f'{sourceTrack}/{imageDir}',
+                                             sourceTrack, sensor)
+            # With maxDays, a start whose partner is further away than that
+            # would only ever be paired longer than the clone set is for, so
+            # it is not a start. The newest acquisition has no partner yet and
+            # stays a start, waiting for one.
+            if start and maxDays is not None and k + 1 < len(images) \
+                    and (images[k + 1][0] - date).days > maxDays:
+                start = False
+            inReach = maxDays is None or prevDate is None or \
+                (date - prevDate).days <= maxDays
+            if start:
+                wanted[imageDir] = 'pair start'
+            elif prevOpenStart and inReach:
+                wanted[imageDir] = 'second image'
+            prevOpenStart = start and \
+                not glob.glob(f'{track}/{imageDir}/azimuth.offsets*')
+            prevDate = date
+    return wanted
+
+
+def setupCloneTiepoints(track, sourcePath, check=False):
+    '''
+    Give the clone track what the tie chain needs: tiepoints/tie_plan_header
+    (maketies/setuptopstie die without it, even on a track with no pairs) and
+    the vel_thumb_header_<range> grid headers, both taken from the prime with
+    the prime project root rewritten to this one.
+    '''
+    primeRoot = os.path.abspath(sourcePath)
+    cloneRoot = os.getcwd()
+    tpDir = f'{track}/tiepoints'
+    primeHeader = f'{primeRoot}/{track}/tiepoints/tie_plan_header'
+    dest = f'{tpDir}/tie_plan_header'
+    if os.path.exists(primeHeader) and not os.path.exists(dest):
+        if check:
+            print(f'would create {dest}')
+        else:
+            os.makedirs(tpDir, exist_ok=True)
+            with open(primeHeader) as fin, open(dest, 'w') as fout:
+                fout.write(fin.read().replace(primeRoot + '/',
+                                              cloneRoot + '/'))
+            print(f'created {dest}')
+    if check:
+        return
+    try:
+        from s1setup.setupS1Tracks import syncThumbHeadersFromPrime
+        syncThumbHeadersFromPrime([track], primeRoot)
+    except Exception as e:      # headers are not fatal to a clone
+        print(f'vel_thumb_header sync skipped: {e}')
+
+
 def main():
     # Parse args
     myArgs = setupClone()
@@ -135,7 +229,8 @@ def main():
         f'{myArgs["sourcePath"]}/{myArgs["track"]}/*_*'))
     print(f'Total products = {len(originals)}')
     #
-    nDup = 0
+    sourceTrack = f'{myArgs["sourcePath"]}/{myArgs["track"]}'
+    candidates = []
     for sourceDir in originals:
         myGeoJson = f'{sourceDir}/geodat10x2.geojson'
         # Skip if not geojson
@@ -146,16 +241,43 @@ def main():
         s1, date = readGeojson(myGeoJson)
         if (s1 == myArgs['sensor'] and date >= myArgs['firstdate']
                 and date <= myArgs['lastdate']):
-            imageDir = os.path.basename(sourceDir)
-            #
-            if (not os.path.exists(f'{myArgs["track"]}/{imageDir}')) \
-                    and (not myArgs['noSkipIfExists']):
-                # make the copy
-                nDup += duplicateDir(sourceDir, imageDir, myArgs['track'])
+            candidates.append((os.path.basename(sourceDir), date))
+    if myArgs['requireSlc']:
+        # A clone symlinks the prime SLC; once that has been cleaned away the
+        # clone would only hold a dangling link, so it is not made.
+        withSlc = [(i, d) for i, d in candidates
+                   if slcExists(f'{sourceTrack}/{i}/{i}.slc')]
+        if len(withSlc) < len(candidates):
+            print(f'{len(candidates) - len(withSlc)} {myArgs["sensor"]} '
+                  'products skipped: prime SLC missing or empty')
+        candidates = withSlc
+    wanted = cloneWanted(candidates, sourceTrack, myArgs['sensor'],
+                         myArgs['track'], maxDays=myArgs['maxDays'])
+    nSkip = len(candidates) - len(wanted)
+    print(f'{len(candidates)} {myArgs["sensor"]} products in range, '
+          f'{len(wanted)} need a clone, {nSkip} already paired same-sensor '
+          'by the prime'
+          + (f' or with no same-sensor partner within {myArgs["maxDays"]} days'
+             if myArgs['maxDays'] is not None else ''))
+    #
+    nDup = 0
+    for imageDir, date in candidates:
+        if imageDir not in wanted:
+            continue
+        if (not os.path.exists(f'{myArgs["track"]}/{imageDir}')) \
+                and (not myArgs['noSkipIfExists']):
+            if myArgs['check']:
+                print(f'would clone {imageDir} ({wanted[imageDir]})')
+                continue
+            # make the copy
+            nDup += duplicateDir(f'{sourceTrack}/{imageDir}', imageDir,
+                                 myArgs['track'])
     print(f'Number of products duplicated {nDup}')
+    setupCloneTiepoints(myArgs['track'], myArgs['sourcePath'],
+                        check=myArgs['check'])
     velStatsDest = f'{myArgs["track"]}/velocityStats'
     velStatsSource = f'{myArgs["sourcePath"]}/{myArgs["track"]}/velocityStats'
-    if not os.path.exists(velStatsDest):
+    if not os.path.exists(velStatsDest) and not myArgs['check']:
         os.symlink(velStatsSource, velStatsDest)
 
 
