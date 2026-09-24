@@ -152,10 +152,11 @@ so the whole chain stays in one format.
 | `setuppairs` | Runs `grepdate` per frame and calls `setupSARpair.py` (still in `insarScripts/bin`) for every `o--` acquisition whose gap to the next same-frame acquisition is 0 < nDays <= sensor `maxDays` — consecutive pairs only, any separation (1, 5, 6, 7, 12, 13 ... days); `--check` dry-runs |
 | `setupStrackReg` | Per-pair registration (`coarsereg` + Gamma offset_* + `simoffsets.py` + `strack`) or full offset tracking + culling (`strack` + `cullst` via `cleanoff`) |
 | `cloneSLCdir` | Clones an SLC directory for a sensor/date range — copies small metadata, symlinks large `.slc`/`.pow` files |
-| `cullSLCclones` | Companion to `cloneSLCdir` — removes duplicate `runboth` files from clones whose `setupStrackReg.py --frame` params match the original |
+| `cullSLCclones` | Companion to `cloneSLCdir` — removes duplicate `runboth` files from clones whose `setupStrackReg.py --frame` params match the original, then redundant clone dirs (`--noRemoveRedundant` keeps the dirs) |
 | `spinner` | `Spinner` class — small terminal busy-indicator used by `setupTrack` during long steps |
 | `updateOffsetsToTiff` | Migrates an already-processed frame dir from raw flat binary to GeoTIFF + tiff-backed VRTs, and regenerates its post-processing scripts in tiff form. See "Migrating old frame dirs" below |
 | `reprocessS1` | Queue-driven rebuild of frames over a date window: refile archive zips → `setupTrack --overWrite` → `setup_<orbit>_<burst>` → strip TIFFs and subswath SLCs. Uses `asfsearchdownload.queueS1` with its own `queueDir`; see [Documents/reprocessS1.md](Documents/reprocessS1.md) |
+| `prepareS1Pairs` | From a project top dir: `segmentTrack -refreshLinks -commit` → the `setup_*` scripts (via `reprocessS1.runSetupScript`) → `setuppairs` per track, then `cloneSLCdir` → `setuppairs` → `cullSLCclones --noRemoveRedundant` in each secondary, and writes the new runboths as a `newRunboth-<stamp>.pyboss` list for `pboss.py -c`. Serial; mails the report if segmenting fails; see [Documents/prepareS1Pairs.md](Documents/prepareS1Pairs.md) |
 
 ## External tool dependencies
 

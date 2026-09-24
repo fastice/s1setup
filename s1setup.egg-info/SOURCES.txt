@@ -8,6 +8,7 @@ s1setup/computeBurstTimes.py
 s1setup/cullSLCclones.py
 s1setup/dequeuePboss.py
 s1setup/findgain.py
+s1setup/prepareS1Pairs.py
 s1setup/radcalcoeffs.py
 s1setup/reprocessS1.py
 s1setup/runPreProcTops.py
@@ -19,6 +20,7 @@ s1setup/setupStrackReg.py
 s1setup/setupTrack.py
 s1setup/setuppairs.py
 s1setup/spinner.py
+s1setup/sweepS1.py
 s1setup/trimTopsSLCsToFit.py
 s1setup/updateOffsetsToTiff.py
 s1setup/updateS1State.py

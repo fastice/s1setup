@@ -477,60 +477,71 @@ def assembleUnit(record, config, unitDir):
 
 
 def buildFrames(record, config):
-    """ Run each setup_<orbit>_<burst> in burst order, in the processing dir.
+    """ Run each setup_<orbit>_<burst> in burst order, in the processing dir. """
+    procDir, orbit = record['procDir'], record['orbit']
+    total = len(record['frames'])
+    for index, burst in enumerate(record['frames'], start=1):
+        failure = runSetupScript(procDir, orbit, burst, index, total)
+        if failure:
+            return failure
+    return None
+
+
+def runSetupScript(procDir, orbit, burst, index=1, total=1):
+    """ Run one setup_<orbit>_<burst> in procDir and verify the frame it builds.
+
+    Returns None when <orbit>_<burst>.slc is built at its full size, otherwise a
+    one-line reason. Shared by buildFrames and prepareS1Pairs.
 
     A crashed earlier run can leave the script's SCRATCH dir behind, and the
     script's own `mkdir $SCRATCH/<frame>` does not check -- it would carry on
     over the stale contents -- so it is cleared first.
     """
-    procDir, orbit = record['procDir'], record['orbit']
-    total = len(record['frames'])
-    for index, burst in enumerate(record['frames'], start=1):
-        script = os.path.join(procDir, f'setup_{orbit}_{burst}')
-        if not os.path.exists(script):
-            return f'missing {os.path.basename(script)}'
-        scratch = scratchOf(script) or '/dev/shm'
-        stale = os.path.join(scratch, f'{orbit}_{burst}')
-        if os.path.exists(stale):
-            print(f'    clearing stale {stale}')
-            shutil.rmtree(stale, ignore_errors=True)
-        # The script's merge-back is `mv <new>/* <existing>_save`, and mv will
-        # not merge one directory into another that is not empty -- so a frame
-        # rebuilt over an old one keeps the old iw/ pars and silently discards
-        # the ones just made ('inter-device move failed ... Directory not
-        # empty'). The script repopulates iw/ itself, so clearing it first is
-        # what makes the merge complete.
-        staleIw = os.path.join(procDir, f'{orbit}_{burst}', 'iw')
-        if os.path.isdir(staleIw):
-            print(f'    clearing stale {staleIw}')
-            shutil.rmtree(staleIw, ignore_errors=True)
-        started = time.time()
-        # Gamma's per-burst chatter is ~7000 lines a unit, which over a full
-        # queue buries everything else. Captured rather than dropped: on a
-        # failure the script says nothing itself, so the log is the only
-        # account of what went wrong.
-        logPath = os.path.join(procDir,
-                               f'log.{orbit}_{burst}.{os.getpid()}.'
-                               f'{datetime.now().strftime("%Y%m%d")}')
-        print(f'    ({index}/{total}) {os.path.basename(script)} '
-              f'-> {os.path.basename(logPath)}', flush=True)
-        with open(logPath, 'w') as logfp:
-            result = subprocess.run(script, shell=True, executable='/bin/csh',
-                                    cwd=procDir, stdout=logfp,
-                                    stderr=subprocess.STDOUT)
-        # The generated scripts do not check their own steps, so the exit code
-        # is only the last command's. The built SLC is the real test.
-        if not frameSlcOk(procDir, orbit, burst):
-            try:
-                with open(logPath) as logfp:
-                    for line in logfp.read().splitlines()[-15:]:
-                        print(f'      {line}', file=sys.stderr)
-            except OSError:
-                pass
-            return (f'frame {burst} not built (setup script exited '
-                    f'{result.returncode}; see {logPath})')
-        print(f'    ({index}/{total}) {orbit}_{burst}.slc ok '
-              f'({elapsedStr(time.time() - started)})', flush=True)
+    script = os.path.join(procDir, f'setup_{orbit}_{burst}')
+    if not os.path.exists(script):
+        return f'missing {os.path.basename(script)}'
+    scratch = scratchOf(script) or '/dev/shm'
+    stale = os.path.join(scratch, f'{orbit}_{burst}')
+    if os.path.exists(stale):
+        print(f'    clearing stale {stale}')
+        shutil.rmtree(stale, ignore_errors=True)
+    # The script's merge-back is `mv <new>/* <existing>_save`, and mv will
+    # not merge one directory into another that is not empty -- so a frame
+    # rebuilt over an old one keeps the old iw/ pars and silently discards
+    # the ones just made ('inter-device move failed ... Directory not
+    # empty'). The script repopulates iw/ itself, so clearing it first is
+    # what makes the merge complete.
+    staleIw = os.path.join(procDir, f'{orbit}_{burst}', 'iw')
+    if os.path.isdir(staleIw):
+        print(f'    clearing stale {staleIw}')
+        shutil.rmtree(staleIw, ignore_errors=True)
+    started = time.time()
+    # Gamma's per-burst chatter is ~7000 lines a unit, which over a full
+    # queue buries everything else. Captured rather than dropped: on a
+    # failure the script says nothing itself, so the log is the only
+    # account of what went wrong.
+    logPath = os.path.join(procDir,
+                           f'log.{orbit}_{burst}.{os.getpid()}.'
+                           f'{datetime.now().strftime("%Y%m%d")}')
+    print(f'    ({index}/{total}) {os.path.basename(script)} '
+          f'-> {os.path.basename(logPath)}', flush=True)
+    with open(logPath, 'w') as logfp:
+        result = subprocess.run(script, shell=True, executable='/bin/csh',
+                                cwd=procDir, stdout=logfp,
+                                stderr=subprocess.STDOUT)
+    # The generated scripts do not check their own steps, so the exit code
+    # is only the last command's. The built SLC is the real test.
+    if not frameSlcOk(procDir, orbit, burst):
+        try:
+            with open(logPath) as logfp:
+                for line in logfp.read().splitlines()[-15:]:
+                    print(f'      {line}', file=sys.stderr)
+        except OSError:
+            pass
+        return (f'frame {burst} not built (setup script exited '
+                f'{result.returncode}; see {logPath})')
+    print(f'    ({index}/{total}) {orbit}_{burst}.slc ok '
+          f'({elapsedStr(time.time() - started)})', flush=True)
     return None
 
 
