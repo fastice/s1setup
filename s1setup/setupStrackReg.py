@@ -131,7 +131,14 @@ def mkSLC2link(orbit2, frame, slcFiles2, resetPar=False):
     if not os.path.exists(slc2link):
         subprocess.call('ln -s '+slc2file+' .', shell=True,
                         executable='/bin/csh')
-    # make a new isp file for the second image
+    # make a new isp file for the second image. An SLC with a .slc.vrt (e.g.
+    # NISAR) has its isp par already and checkSARFiles drops cwpar for it, so
+    # link that par here, where makeInsarInfo expects image 2's isppar.
+    if 'cwpar' not in slcFiles2:
+        if not os.path.lexists(slcFiles2['isppar']):
+            os.symlink(f'../{orbit2}_{frame}/{slcFiles2["isppar"]}',
+                       slcFiles2['isppar'])
+        return
     if not os.path.exists(slcFiles2['cwpar']) or resetPar:
         devnull = open(os.devnull, 'w')
         command = f'par_MSP ../{orbit2}_{frame}/{slcFiles2["sensorpar"]} '
