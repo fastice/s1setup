@@ -362,6 +362,17 @@ def secondaryStep(topDir, secondaries, segmented, years, args, rep, outDir):
                         error=True)
                 continue
             cloned = re.search(r'duplicated (\d+)', text)
+            nCloned = int(cloned.group(1)) if cloned else 0
+            # A secondary only gets frames where the prime has a same-sensor pair skipping the
+            # other sensor (e.g. D in C D D: D(skip C)D). None anywhere -> nothing cloned, no frame
+            # dirs, and setuppairs would 'fail' on the empty dir: that is not an error.
+            if not glob.glob(os.path.join(secTrack, '[0-9]*_[0-9]*')):
+                if nCloned and args.check:
+                    rep.add(4, where, f'would clone {nCloned}; its pairs are counted once cloned')
+                else:
+                    rep.add(4, where, f'no {sensor} pair to make (no same-sensor pair skipping '
+                            'the other sensor in the prime)')
+                continue
             nPairs = pairTrack(secTrack, years, args, rep, outDir, label, 4,
                                extra=maxDays)
             rc, text = runCommand(
