@@ -170,8 +170,9 @@ def removeRedundantClones(myArgs, imageDirs):
     After the duplicate runboths are gone, a clone is kept only if it
       - has offsets (a processed clone pair lives there),
       - still has a runboth (it starts a clone pair),
-      - is the second image of a clone pair that has not been processed yet
-        (the pair needs its SLC link until runboth has run), or
+      - is the second image of any clone pair in the track, processed or not
+        (runboth needs its SLC link, and every tie rerun's azest reads its
+        geodat10x2.in), found from the start's runboth or *.pairinfo, or
       - is not paired same-sensor by the prime (a clone pair start waiting
         for its partner to be acquired).
     Everything else is a copy of a frame the prime already pairs the same
@@ -181,13 +182,20 @@ def removeRedundantClones(myArgs, imageDirs):
     track, sourceTrack = myArgs['track'], \
         f'{myArgs["sourcePath"]}/{myArgs["track"]}'
     neededSecond = set()
-    for imageDir in imageDirs:
-        cloneDir = f'{track}/{imageDir}'
-        if os.path.exists(f'{cloneDir}/runboth') \
-                and not offsetsExist(cloneDir):
+    # Every clone dir in the track, not just this date window, and processed
+    # pairs too: removing their second image left azest unable to open
+    # ../../<orbit2>_<frame>/geodat10x2.in.
+    for cloneDir in glob.glob(f'{track}/*_*'):
+        frame = os.path.basename(cloneDir).split('_')[-1]
+        if os.path.exists(f'{cloneDir}/runboth'):
             pair = parseRunBoth(f'{cloneDir}/runboth')
             if pair is not None:
                 neededSecond.add(f'{pair["orbit2"]}_{pair["frame"]}')
+        for pairInfo in glob.glob(f'{cloneDir}/*.pairinfo'):
+            with open(pairInfo) as fp:
+                fields = fp.readline().split()
+            if len(fields) > 1:
+                neededSecond.add(f'{fields[1]}_{frame}')
     nRemoved = 0
     for imageDir in imageDirs:
         cloneDir = f'{track}/{imageDir}'
