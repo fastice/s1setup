@@ -77,8 +77,10 @@ were dropped. Longer secondary pairs made before the limits are left as they are
 
 The secondaries are found exactly as `setupS1Tracks` finds them,
 from `project.yaml` `secondaryDirectories`. Only tracks that exist in a
-secondary are processed there, and the sensor is taken from the directory name
-(`Sentinel1-S1D` → `S1D`).
+secondary are processed there, and the sensor is taken from the tail of the
+directory name, in either convention in use: `Sentinel1-S1D` → `S1D`
+(Greenland) and `SentinelPIG-1D` → `S1D` (PIG). A name whose tail is neither is
+skipped and reported.
 
 **Step 5.** A runboth is new if it did not exist when the run started, still
 exists (the cull may have removed it), and has no `azimuth.offsets*` yet.

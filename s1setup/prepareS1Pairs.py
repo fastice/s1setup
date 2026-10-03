@@ -48,7 +48,10 @@ log = logging.getLogger('prepareS1Pairs')
 
 TRACK_RE = re.compile(r'track-(\d+)$')
 SETUP_RE = re.compile(r'^setup_(\d+)_(\d+)$')
-SENSOR_RE = re.compile(r'(S1[A-D])$')
+# The sensor a secondary is for, from the tail of its directory name.  Both
+# conventions in use are read: Sentinel1-S1A (Greenland) and SentinelPIG-1A
+# (PIG), so the capture is the 1[A-D] and the S is put back on.
+SENSOR_RE = re.compile(r'[-_]S?(1[A-D])$')
 STEPS = {1: 'segment', 2: 'build SLCs', 3: 'pairs (prime)',
          4: 'secondaries', 5: 'runboth list'}
 
@@ -344,7 +347,7 @@ def secondaryStep(topDir, secondaries, segmented, years, args, rep, outDir):
             rep.add(4, os.path.basename(secDir),
                     'skipped: no S1A/S1C/S1D in the name', error=True)
             continue
-        sensor = sensor.group(1)
+        sensor = 'S' + sensor.group(1)
         for trackDir in segmented:
             name = os.path.basename(trackDir)
             secTrack = os.path.join(secDir, name)
